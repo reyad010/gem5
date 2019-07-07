@@ -402,6 +402,85 @@ ROB<Impl>::doSquash(ThreadID tid)
 }
 
 
+/* **************************
+ * [InvisiSpec] update load insts state
+ * isPrevInstsCompleted; isPrevBrsResolved
+ * *************************/
+template <class Impl>
+void
+ROB<Impl>::updateVisibleState()
+{
+    list<ThreadID>::iterator threads = activeThreads->begin();
+    list<ThreadID>::iterator end = activeThreads->end();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
+        if (instList[tid].empty())
+            continue;
+
+        InstIt inst_it = instList[tid].begin();
+        InstIt tail_inst_it = instList[tid].end();
+
+        bool prevInstsComplete=true;
+        bool prevBrsResolved=true;
+        bool prevInstsCommitted=true;
+        bool prevBrsCommitted=true;
+
+        while (inst_it != tail_inst_it) {
+            DynInstPtr inst = *inst_it++;
+
+            assert(inst!=0);
+
+            if (!prevInstsComplete &&
+                    !prevBrsResolved) {
+                break;
+            }
+
+            if (inst->isLoad()) {
+                if (prevInstsComplete) {
+                    inst->setPrevInstsCompleted();
+                }
+                if (prevBrsResolved){
+                    inst->setPrevBrsResolved();
+                }
+                if (prevInstsCommitted) {
+                    inst->setPrevInstsCommitted();
+                }
+                if (prevBrsCommitted) {
+                    inst->setPrevBrsCommitted();
+                }
+            }
+            
+            // Update prev control insts state
+            if (inst->isControl()){
+                prevBrsCommitted = false;
+                if (!inst->readyToCommit() || inst->getFault()!=NoFault
+                        || inst->isSquashed()){
+                    prevBrsResolved = false;
+                }
+            } 
+            
+            prevInstsCommitted = false;
+
+            // Update prev insts state
+            if (inst->isNonSpeculative() || inst->isStoreConditional()
+               || inst->isMemBarrier() || inst->isWriteBarrier() ||
+               (inst->isLoad() && inst->strictlyOrdered())){
+                //Some special instructions, directly set canCommit
+                //when entering ROB
+                prevInstsComplete = false;
+            }
+            if (!inst->readyToCommit() || inst->getFault()!=NoFault
+                    || inst->isSquashed()){
+                prevInstsComplete = false;
+            }
+            
+        }
+    }
+}
+
+
 template <class Impl>
 void
 ROB<Impl>::updateHead()

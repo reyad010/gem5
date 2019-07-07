@@ -461,6 +461,14 @@ def run(options, root, testsys, cpu_class):
         switch_cpus = [cpu_class(switched_out=True, cpu_id=(i))
                        for i in xrange(np)]
 
+        # [InvisiSpec] configure simualtion scheme
+        if cpu_class == DerivO3CPU:
+            #fatal("Ruby can only be used with DerivO3CPU!")
+            CpuConfig.config_scheme(cpu_class, switch_cpus, options)
+        else:
+            warn("restoring from a checkpoint, "
+                "but not simulate using DerivO3CPU.")
+
         for i in xrange(np):
             if options.fast_forward:
                 testsys.cpu[i].max_insts_any_thread = int(options.fast_forward)

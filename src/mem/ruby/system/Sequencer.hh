@@ -31,6 +31,7 @@
 
 #include <iostream>
 #include <unordered_map>
+#include <queue>
 
 #include "mem/protocol/MachineType.hh"
 #include "mem/protocol/RubyRequestType.hh"
@@ -45,6 +46,7 @@ struct SequencerRequest
     PacketPtr pkt;
     RubyRequestType m_type;
     Cycles issue_time;
+    std::vector<PacketPtr> dependentSpecRequests;
 
     SequencerRequest(PacketPtr _pkt, RubyRequestType _m_type,
                      Cycles _issue_time)
@@ -53,6 +55,19 @@ struct SequencerRequest
 };
 
 std::ostream& operator<<(std::ostream& out, const SequencerRequest& obj);
+
+struct SBB // SpecBufferBlock
+{
+  Addr reqAddress;
+  unsigned reqSize;
+  DataBlock data;
+};
+
+struct SBE // SpecBufferEntry
+{
+  bool isSplit;
+  SBB blocks[2];
+};
 
 class Sequencer : public RubyPort
 {
@@ -83,6 +98,9 @@ class Sequencer : public RubyPort
                       const Cycles forwardRequestTime = Cycles(0),
                       const Cycles firstResponseTime = Cycles(0));
 
+    void specBufferHitCallback();
+    bool updateSBB(PacketPtr pkt, DataBlock& data, Addr dataAddress);
+
     RequestStatus makeRequest(PacketPtr pkt);
     bool empty() const;
     int outstandingCount() const { return m_outstanding_count; }
@@ -97,7 +115,7 @@ class Sequencer : public RubyPort
     void checkCoherence(Addr address);
 
     void markRemoved();
-    void evictionCallback(Addr address);
+    void evictionCallback(Addr address, bool external);
     void invalidateSC(Addr address);
     int coreId() const { return m_coreId; }
 
@@ -238,6 +256,10 @@ class Sequencer : public RubyPort
     std::vector<Stats::Counter> m_IncompleteTimes;
 
     EventFunctionWrapper deadlockCheckEvent;
+
+    std::vector<SBE> m_specBuf;
+    std::queue<std::pair<PacketPtr, Tick>> m_specRequestQueue;
+    EventFunctionWrapper specBufferHitEvent;
 };
 
 inline std::ostream&

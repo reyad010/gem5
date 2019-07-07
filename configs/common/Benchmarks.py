@@ -49,17 +49,17 @@ class SysConfig:
         if self.memsize:
             return self.memsize
         else:
-            return '128MB'
+            return '512MB'
 
     def disk(self):
         if self.diskname:
             return disk(self.diskname)
         elif buildEnv['TARGET_ISA'] == 'alpha':
-            return env.get('LINUX_IMAGE', disk('linux-latest.img'))
+            return env.get('LINUX_IMAGE', disk('alpha-parsec.img'))
         elif buildEnv['TARGET_ISA'] == 'x86':
             return env.get('LINUX_IMAGE', disk('x86root.img'))
         elif buildEnv['TARGET_ISA'] == 'arm':
-            return env.get('LINUX_IMAGE', disk('linux-aarch32-ael.img'))
+            return env.get('LINUX_IMAGE', disk('aarch64-ubuntu-trusty-headless.img'))
         elif buildEnv['TARGET_ISA'] == 'sparc':
             return env.get('LINUX_IMAGE', disk('disk.s10hw2'))
         else:

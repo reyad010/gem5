@@ -79,7 +79,9 @@ LSQUnit<Impl>::WritebackEvent::process()
     if (pkt->senderState)
         delete pkt->senderState;
 
-    delete pkt->req;
+    if (!pkt->isValidate() && !pkt->isExpose()){
+        delete pkt->req;
+    }
     delete pkt;
 }
 
@@ -90,6 +92,9 @@ LSQUnit<Impl>::WritebackEvent::description() const
     return "Store writeback";
 }
 
+
+// [InvisiSpec] This function deals with
+// acknowledge response to memory read/write
 template<class Impl>
 void
 LSQUnit<Impl>::completeDataAccess(PacketPtr pkt)
@@ -108,8 +113,25 @@ LSQUnit<Impl>::completeDataAccess(PacketPtr pkt)
         return;
     }
 
+    // need to update hit info for corresponding instruction
+    if (pkt->isL1Hit() && pkt->isSpec() && pkt->isRead()){
+        if (state->isSplit && ! pkt->isFirst()){
+            inst->setL1HitHigh();
+        } else {
+            inst->setL1HitLow();
+        }
+    } else if (!pkt->isSpec()) {
+        setSpecBuffState(pkt->req);
+    }
+
     // If this is a split access, wait until all packets are received.
     if (TheISA::HasUnalignedMemAcc && !state->complete()) {
+        // Not the good place, but we need to fix the memory leakage
+        if (pkt->isExpose() || pkt->isValidate()){
+            assert(!inst->needDeletePostReq());
+            assert(!pkt->isInvalidate());
+            delete pkt->req;
+        }
         return;
     }
 
@@ -118,7 +140,9 @@ LSQUnit<Impl>::completeDataAccess(PacketPtr pkt)
         if (!state->noWB) {
             // Only loads and store conditionals perform the writeback
             // after receving the response from the memory
+            // [mengjia] validation also needs writeback, expose do not need
             assert(inst->isLoad() || inst->isStoreConditional());
+
             if (!TheISA::HasUnalignedMemAcc || !state->isSplit ||
                 !state->isLoad) {
                 writeback(inst, pkt);
@@ -130,6 +154,10 @@ LSQUnit<Impl>::completeDataAccess(PacketPtr pkt)
         if (inst->isStore()) {
             completeStore(state->idx);
         }
+
+        if (pkt->isValidate() || pkt->isExpose()) {
+            completeValidate(inst, pkt);
+        }
     }
 
     if (TheISA::HasUnalignedMemAcc && state->isSplit && state->isLoad) {
@@ -138,15 +166,22 @@ LSQUnit<Impl>::completeDataAccess(PacketPtr pkt)
     }
 
     pkt->req->setAccessLatency();
+    // probe point, not sure about the mechanism [mengjia]
     cpu->ppDataAccessComplete->notify(std::make_pair(inst, pkt));
 
+    // Not the good place, but we need to fix the memory leakage
+    if (pkt->isExpose() || pkt->isValidate()){
+        assert(!inst->needDeletePostReq());
+        assert(!pkt->isInvalidate());
+        delete pkt->req;
+    }
     delete state;
 }
 
 template <class Impl>
 LSQUnit<Impl>::LSQUnit()
-    : loads(0), stores(0), storesToWB(0), cacheBlockMask(0), stalled(false),
-      isStoreBlocked(false), storeInFlight(false), hasPendingPkt(false),
+    : loads(0), loadsToVLD(0), stores(0), storesToWB(0), cacheBlockMask(0), stalled(false),
+      isStoreBlocked(false), isValidationBlocked(false), storeInFlight(false), hasPendingPkt(false),
       pendingPkt(nullptr)
 {
 }
@@ -180,7 +215,52 @@ LSQUnit<Impl>::init(O3CPU *cpu_ptr, IEW *iew_ptr, DerivO3CPUParams *params,
     depCheckShift = params->LSQDepCheckShift;
     checkLoads = params->LSQCheckLoads;
     cacheStorePorts = params->cacheStorePorts;
+
+    // According to the scheme, we need to define actions as follows.
+    // loadInExec: if False, no packets are sent in execution stage;
+    //             if True, send either readReq or readSpecReq
+    // isInvisibleSpec: if True, send readSpecReq in execution statge;
+    //                  if False, send readReq
+    // needsTSO: if True, squash read on receiving invalidations, and only allow one outstanding write at a time;
+    //           if False, no squash on receiving invalidaiton, and allow multiple outstanding writes.
+    // isConservative: if True, react after all preceding instructions complete/no exception;
+    //                 if False, react only after all preceding stores/brancehs complete
+    const std::string scheme = params->simulateScheme;
+    if (scheme.compare("UnsafeBaseline")==0){
+        loadInExec = true;
+        isInvisibleSpec = false; // send real request
+        isFuturistic = false; // not relevant in unsafe mode.
+    }else if (scheme.compare("FuturisticSafeFence")==0){
+        // "LFENCE" before every load
+        loadInExec = false;
+        isInvisibleSpec = false; // not used since loadInExec is false
+        isFuturistic = true; // send readReq at head of ROB
+    }else if (scheme.compare("FuturisticSafeInvisibleSpec")==0){
+        // only make load visible when all preceding instructions
+        // complete and no exception
+        loadInExec = true;
+        isInvisibleSpec = true; // send request but not change cache state
+        isFuturistic = true; // conservative condition to send validations
+    }else if (scheme.compare("SpectreSafeFence")==0){
+        // "LFENCE" after every branch
+        loadInExec = false;
+        isInvisibleSpec = false; // not used since loadInExec is false
+        isFuturistic = false; // commit when preceding branches are resolved
+    }else if (scheme.compare("SpectreSafeInvisibleSpec")==0){
+        // make load visible when all preceiding branches are resolved
+        loadInExec = true;
+        isInvisibleSpec = true; // send request but not change cache state
+        isFuturistic = false; // only deal with spectre attacks
+    }else {
+        cprintf("ERROR: unsupported simulation scheme: %s!\n", scheme);
+        exit(1);
+    }
     needsTSO = params->needsTSO;
+    allowSpecBuffHit = params->allowSpecBuffHit;
+    cprintf("Info: simulation uses scheme: %s; "
+                "needsTSO=%d; allowSpecBuffHit=%d\n",
+                scheme, needsTSO, allowSpecBuffHit);
+    // [mengjia] end of setting configuration variables
 
     resetState();
 }
@@ -190,7 +270,7 @@ template<class Impl>
 void
 LSQUnit<Impl>::resetState()
 {
-    loads = stores = storesToWB = 0;
+    loads = stores = loadsToVLD = storesToWB = 0;
 
     loadHead = loadTail = 0;
 
@@ -260,6 +340,26 @@ LSQUnit<Impl>::regStats()
     lsqCacheBlocked
         .name(name() + ".cacheBlocked")
         .desc("Number of times an access to memory failed due to the cache being blocked");
+
+    specBuffHits
+        .name(name() + ".specBuffHits")
+        .desc("Number of times an access hits in speculative buffer");
+
+    specBuffMisses
+        .name(name() + ".specBuffMisses")
+        .desc("Number of times an access misses in speculative buffer");
+
+    numValidates
+        .name(name() + ".numValidates")
+        .desc("Number of validates sent to cache");
+
+    numExposes
+        .name(name() + ".numExposes")
+        .desc("Number of exposes sent to cache");
+
+    numConvertedExposes
+        .name(name() + ".numConvertedExposes")
+        .desc("Number of exposes converted from validation");
 }
 
 template<class Impl>
@@ -291,6 +391,7 @@ LSQUnit<Impl>::drainSanityCheck() const
         assert(!loadQueue[i]);
 
     assert(storesToWB == 0);
+    assert(loadsToVLD == 0);
     assert(!retryPkt);
 }
 
@@ -379,6 +480,7 @@ LSQUnit<Impl>::insertLoad(DynInstPtr &load_inst)
     incrLdIdx(loadTail);
 
     ++loads;
+
 }
 
 template <class Impl>
@@ -402,6 +504,7 @@ LSQUnit<Impl>::insertStore(DynInstPtr &store_inst)
     ++stores;
 }
 
+// It is an empty function? why? [mengjia]
 template <class Impl>
 typename Impl::DynInstPtr
 LSQUnit<Impl>::getMemDepViolator()
@@ -462,13 +565,16 @@ LSQUnit<Impl>::checkSnoop(PacketPtr pkt)
         Addr load_addr_high = ld_inst->physEffAddrHigh & cacheBlockMask;
 
         // Check that this snoop didn't just invalidate our lock flag
-        if (ld_inst->effAddrValid() && (load_addr_low == invalidate_addr
-                                        || load_addr_high == invalidate_addr)
+        // [InvisiSpec] also make sure the instruction has been sent out
+        // otherwise, we cause unneccessary squash
+        if (ld_inst->effAddrValid() && !ld_inst->fenceDelay()
+                && (load_addr_low == invalidate_addr
+                    || load_addr_high == invalidate_addr)
             && ld_inst->memReqFlags & Request::LLSC)
             TheISA::handleLockedSnoopHit(ld_inst.get());
     }
 
-    // If this is the only load in the LSQ we don't care
+    // If not match any load entry, then do nothing [mengjia]
     if (load_idx == loadTail)
         return;
 
@@ -479,7 +585,10 @@ LSQUnit<Impl>::checkSnoop(PacketPtr pkt)
     while (load_idx != loadTail) {
         DynInstPtr ld_inst = loadQueue[load_idx];
 
-        if (!ld_inst->effAddrValid() || ld_inst->strictlyOrdered()) {
+        // [SafeSpce] check snoop violation when the load has
+        // been sent out; otherwise, unneccessary squash
+        if (!ld_inst->effAddrValid() || ld_inst->strictlyOrdered()
+                || ld_inst->fenceDelay()) {
             incrLdIdx(load_idx);
             continue;
         }
@@ -497,11 +606,29 @@ LSQUnit<Impl>::checkSnoop(PacketPtr pkt)
                 // all other loads, this load as well as *all* subsequent loads
                 // need to be squashed to prevent possible load reordering.
                 force_squash = true;
+
+                // [InvisiSpec] in InvisiSpec, we do not need to squash
+                // the load at the head of LQ,
+                // as well as the one do not need validation
+                if (isInvisibleSpec &&
+                    (load_idx==loadHead || ld_inst->needExposeOnly())){
+                    force_squash = false;
+                }
+                if (!pkt->isExternalEviction() && isInvisibleSpec){
+                    force_squash = false;
+                    ld_inst->clearL1HitHigh();
+                    ld_inst->clearL1HitLow();
+                }
             }
             if (ld_inst->possibleLoadViolation() || force_squash) {
                 DPRINTF(LSQUnit, "Conflicting load at addr %#x [sn:%lli]\n",
                         pkt->getAddr(), ld_inst->seqNum);
 
+                //[InvisiSpec] mark the load hit invalidation
+                ld_inst->hitInvalidation(true);
+                if (pkt->isExternalEviction()){
+                    ld_inst->hitExternalEviction(true);
+                }
                 // Mark the load for re-execution
                 ld_inst->fault = std::make_shared<ReExec>();
             } else {
@@ -526,6 +653,103 @@ LSQUnit<Impl>::checkSnoop(PacketPtr pkt)
 }
 
 template <class Impl>
+bool
+LSQUnit<Impl>::checkPrevLoadsExecuted(int req_idx)
+{
+    int load_idx = loadHead;
+    while (load_idx != req_idx){
+        if (!loadQueue[load_idx]->isExecuted()){
+            // if at least on load ahead of current load
+            // does not finish spec access,
+            // then return false
+            return false;
+        }
+        incrLdIdx(load_idx);
+    }
+
+    //if all executed, return true
+    return true;
+}
+
+template <class Impl>
+void
+LSQUnit<Impl>::setSpecBuffState(RequestPtr expose_req)
+{
+    Addr req_eff_addr1 = expose_req->getPaddr() & cacheBlockMask;
+
+    int load_idx = loadHead;
+    while (load_idx != loadTail){
+        DynInstPtr ld_inst = loadQueue[load_idx];
+        if (ld_inst->effAddrValid()){
+
+            Addr ld_eff_addr1 = ld_inst->physEffAddrLow & cacheBlockMask;
+            Addr ld_eff_addr2 = ld_inst->physEffAddrHigh & cacheBlockMask;
+            if (ld_eff_addr1 == req_eff_addr1){
+                ld_inst->setSpecBuffObsoleteLow();
+            } else if (ld_eff_addr2 == req_eff_addr1){
+                ld_inst->setSpecBuffObsoleteHigh();
+            }
+        }
+        incrLdIdx(load_idx);
+    }
+}
+
+
+template <class Impl>
+int
+LSQUnit<Impl>::checkSpecBuffHit(RequestPtr req, int req_idx)
+{
+
+    Addr req_eff_addr1 = req->getPaddr() & cacheBlockMask;
+    //Addr req_eff_addr2 = (req->getPaddr() + req->getSize()-1) & cacheBlockMask;
+    // the req should be within the same cache line
+    //assert (req_eff_addr1 == req_eff_addr2);
+    assert (!loadQueue[req_idx]->isExecuted());
+
+    int load_idx = loadHead;
+
+    while (load_idx != loadTail){
+        DynInstPtr ld_inst = loadQueue[load_idx];
+        if (ld_inst->effAddrValid()){
+            Addr ld_eff_addr1 = ld_inst->physEffAddrLow & cacheBlockMask;
+            Addr ld_eff_addr2 = ld_inst->physEffAddrHigh & cacheBlockMask;
+
+            if ((req_eff_addr1 == ld_eff_addr1 && ld_inst->isL1HitLow())
+                || (req_eff_addr1 == ld_eff_addr2 && ld_inst->isL1HitHigh())){
+                return -1;
+                //already in L1, do not copy from buffer
+            } else {
+
+                if (ld_inst->isExecuted() && ld_inst->needPostFetch()
+                    && !ld_inst->isSquashed() && ld_inst->fault==NoFault){
+                    if (req_eff_addr1 == ld_eff_addr1 && !ld_inst->isL1HitLow()
+                            && !ld_inst->isSpecBuffObsoleteLow()){
+                        DPRINTF(LSQUnit, "Detected Spec Hit with inst [sn:%lli] "
+                            "and [sn:%lli] (low) at address %#x\n",
+                            loadQueue[req_idx]->seqNum, ld_inst->seqNum,
+                            req_eff_addr1);
+                        return load_idx;
+                    } else if ( ld_eff_addr2 !=0  &&
+                        req_eff_addr1 == ld_eff_addr2 && !ld_inst->isL1HitHigh()
+                        && !ld_inst->isSpecBuffObsoleteHigh()){
+                        DPRINTF(LSQUnit, "Detected Spec Hit with inst [sn:%lli] "
+                            "and [sn:%lli] (high) at address %#x\n",
+                            loadQueue[req_idx]->seqNum, ld_inst->seqNum,
+                            req_eff_addr1);
+                        return load_idx;
+                    }
+                }
+            }
+        }
+        incrLdIdx(load_idx);
+    }
+
+    return -1;
+}
+
+
+
+template <class Impl>
 Fault
 LSQUnit<Impl>::checkViolations(int load_idx, DynInstPtr &inst)
 {
@@ -539,7 +763,10 @@ LSQUnit<Impl>::checkViolations(int load_idx, DynInstPtr &inst)
      */
     while (load_idx != loadTail) {
         DynInstPtr ld_inst = loadQueue[load_idx];
-        if (!ld_inst->effAddrValid() || ld_inst->strictlyOrdered()) {
+        // [InvisiSpec] no need to check violation for unsent load
+        // otherwise, unneccessary squash
+        if (!ld_inst->effAddrValid() || ld_inst->strictlyOrdered()
+                || ld_inst->fenceDelay()) {
             incrLdIdx(load_idx);
             continue;
         }
@@ -618,14 +845,25 @@ LSQUnit<Impl>::executeLoad(DynInstPtr &inst)
 
     assert(!inst->isSquashed());
 
+    // use ISA interface to generate correct access request
+    // initiateAcc is implemented in dyn_inst_impl.hh
+    // The interface calls corresponding ISA defined function
+    // check buld/ARM/arch/generic/memhelper.hh for more info [mengjia]
     load_fault = inst->initiateAcc();
 
-    if (inst->isTranslationDelayed() &&
+    // if translation delay, deferMem [mengjia]
+    // in the case it is not the correct time to send the load
+    // also defer it
+    if ( (inst->isTranslationDelayed() || inst->fenceDelay()
+                || inst->specTLBMiss()) &&
         load_fault == NoFault)
         return load_fault;
 
     // If the instruction faulted or predicated false, then we need to send it
     // along to commit without the instruction completing.
+    //
+    // if it is faulty, not execute it, send it to commit, and commit statge will deal with it
+    // here is signling the ROB, the inst can commit [mengjia]
     if (load_fault != NoFault || !inst->readPredicate()) {
         // Send this instruction to commit, also make sure iew stage
         // realizes there is activity.  Mark it as executed unless it
@@ -673,6 +911,8 @@ LSQUnit<Impl>::executeStore(DynInstPtr &store_inst)
     // address.  If so, then we have a memory ordering violation.
     int load_idx = store_inst->lqIdx;
 
+    // TODO: Check whether this store tries to get an exclusive copy 
+    // of target line [mengjia]
     Fault store_fault = store_inst->initiateAcc();
 
     if (store_inst->isTranslationDelayed() &&
@@ -771,14 +1011,342 @@ LSQUnit<Impl>::writebackPendingStore()
     if (hasPendingPkt) {
         assert(pendingPkt != NULL);
 
-        // If the cache is blocked, this will store the packet for retry.
-        if (sendStore(pendingPkt)) {
-            storePostSend(pendingPkt);
+        if(pendingPkt->isWrite()){
+            // If the cache is blocked, this will store the packet for retry.
+            if (sendStore(pendingPkt)) {
+                storePostSend(pendingPkt);
+            }
+            pendingPkt = NULL;
+            hasPendingPkt = false;
         }
-        pendingPkt = NULL;
-        hasPendingPkt = false;
     }
 }
+
+
+
+
+// [InvisiSpec] update FenceDelay State
+template <class Impl>
+void
+LSQUnit<Impl>::updateVisibleState()
+{
+    int load_idx = loadHead;
+
+    //iterate all the loads and update its fencedelay state accordingly
+    while (load_idx != loadTail && loadQueue[load_idx]){
+        DynInstPtr inst = loadQueue[load_idx];
+
+        if (!loadInExec){
+
+            if ( (isFuturistic && inst->isPrevInstsCommitted()) ||
+                    (!isFuturistic && inst->isPrevBrsCommitted())){
+                if (inst->fenceDelay()){
+                    DPRINTF(LSQUnit, "Clear virtual fence for "
+                            "inst [sn:%lli] PC %s\n",
+                        inst->seqNum, inst->pcState());
+                }
+                inst->fenceDelay(false);
+            }else {
+                if (!inst->fenceDelay()){
+                    DPRINTF(LSQUnit, "Deffering an inst [sn:%lli] PC %s"
+                            " due to virtual fence\n",
+                        inst->seqNum, inst->pcState());
+                }
+                inst->fenceDelay(true);
+            }
+            inst->readyToExpose(true);
+        } else if (loadInExec && isInvisibleSpec){
+
+            if ( (isFuturistic && inst->isPrevInstsCompleted()) ||
+                    (!isFuturistic && inst->isPrevBrsResolved())){
+                if (!inst->readyToExpose()){
+                    DPRINTF(LSQUnit, "Set readyToExpose for "
+                            "inst [sn:%lli] PC %s\n",
+                        inst->seqNum, inst->pcState());
+                    if (inst->needPostFetch()){
+                        ++loadsToVLD;
+                    }
+                }
+                inst->readyToExpose(true);
+            }else {
+                if (inst->readyToExpose()){
+                    DPRINTF(LSQUnit, "The load can not be validated "
+                            "[sn:%lli] PC %s\n",
+                        inst->seqNum, inst->pcState());
+                    assert(0);
+                    //--loadsToVLD;
+                }
+                inst->readyToExpose(false);
+            }
+            inst->fenceDelay(false);
+        } else {
+            inst->readyToExpose(true);
+            inst->fenceDelay(false);
+        }
+        incrLdIdx(load_idx);
+    }
+}
+
+// [InvisiSpec] validate loads
+template <class Impl>
+int
+LSQUnit<Impl>::exposeLoads()
+{
+    if(!isInvisibleSpec){
+        assert(loadsToVLD==0
+            && "request validation on Non invisible Spec mode");
+    }
+
+    int old_loadsToVLD = loadsToVLD;
+
+    // [InvisiSpec] Note:
+    // need to iterate from the head every time
+    // since the load can be exposed out-of-order
+    int loadVLDIdx = loadHead;
+
+    while (loadsToVLD > 0 &&
+        loadVLDIdx != loadTail &&
+        loadQueue[loadVLDIdx]) {
+
+        if (loadQueue[loadVLDIdx]->isSquashed()){
+            incrLdIdx(loadVLDIdx);
+            continue;
+        }
+        // skip the loads that either do not need to expose
+        // or exposed already
+        if(!loadQueue[loadVLDIdx]->needPostFetch()
+                || loadQueue[loadVLDIdx]->isExposeSent() ){
+            incrLdIdx(loadVLDIdx);
+            continue;
+        }
+
+        DynInstPtr load_inst = loadQueue[loadVLDIdx];
+        if (loadQueue[loadVLDIdx]->fault!=NoFault){
+            //load is executed, so it wait for expose complete
+            //to send it to commit, regardless of whether it is ready
+            //to expose
+            load_inst->setExposeCompleted();
+            load_inst->setExposeSent();
+            loadsToVLD--;
+            if (load_inst->isExecuted()){
+                DPRINTF(LSQUnit, "Execute finished and gets violation fault."
+                    "Send inst [sn:%lli] to commit stage.\n",
+                    load_inst->seqNum);
+                    iewStage->instToCommit(load_inst);
+                    iewStage->activityThisCycle();
+            }
+            incrLdIdx(loadVLDIdx);
+            continue;
+        }
+
+        // skip the loads that need expose but
+        // are not ready
+        if (loadQueue[loadVLDIdx]->needPostFetch()
+                && !loadQueue[loadVLDIdx]->readyToExpose()){
+            incrLdIdx(loadVLDIdx);
+            continue;
+        }
+
+        assert(loadQueue[loadVLDIdx]->needPostFetch()
+                && loadQueue[loadVLDIdx]->readyToExpose() );
+
+        assert(!load_inst->isCommitted());
+
+
+        Request *req = load_inst->postReq;
+        Request *sreqLow = load_inst->postSreqLow;
+        Request *sreqHigh = load_inst->postSreqHigh;
+
+        // we should not have both req and sreqLow not NULL
+        assert( !(req && sreqLow));
+
+        DPRINTF(LSQUnit, "Validate/Expose request for inst [sn:%lli]"
+            " PC= %s. req=%#x, reqLow=%#x, reqHigh=%#x\n",
+            load_inst->seqNum, load_inst->pcState(),
+            (Addr)(load_inst->postReq),
+            (Addr)(load_inst->postSreqLow), (Addr)(load_inst->postSreqHigh));
+
+        PacketPtr data_pkt = NULL;
+        PacketPtr snd_data_pkt = NULL;
+
+        LSQSenderState *state = new LSQSenderState;
+        state->isLoad = false;
+        state->idx = loadVLDIdx;
+        state->inst = load_inst;
+        state->noWB = true;
+
+        bool split = false;
+        if (TheISA::HasUnalignedMemAcc && sreqLow) {
+            split = true;
+        } else {
+            assert(req);
+        }
+
+        bool onlyExpose = false;
+        if (!split) {
+            if (load_inst->needExposeOnly() || load_inst->isL1HitLow()){
+                data_pkt = Packet::createExpose(req);
+                onlyExpose = true;
+            }else {
+                data_pkt = Packet::createValidate(req);
+                if (!load_inst->vldData)
+                    load_inst->vldData = new uint8_t[1];
+                data_pkt->dataStatic(load_inst->vldData);
+            }
+            data_pkt->senderState = state;
+            data_pkt->setFirst();
+            data_pkt->reqIdx = loadVLDIdx;
+            DPRINTF(LSQUnit, "contextid = %d\n", req->contextId());
+        } else {
+            // allocate memory if we need at least one validation
+            if (!load_inst->needExposeOnly() &&
+                (!load_inst->isL1HitLow() || !load_inst->isL1HitHigh())){
+                if (!load_inst->vldData)
+                    load_inst->vldData = new uint8_t[2];
+            } else {
+                onlyExpose = true;
+            }
+
+            // Create the split packets. - first one
+            if (load_inst->needExposeOnly() || load_inst->isL1HitLow()){
+                data_pkt = Packet::createExpose(sreqLow);
+            }else{
+                data_pkt = Packet::createValidate(sreqLow);
+                assert(load_inst->vldData);
+                data_pkt->dataStatic(load_inst->vldData);
+            }
+
+            // Create the split packets. - second one
+            if (load_inst->needExposeOnly() || load_inst->isL1HitHigh()){
+                snd_data_pkt = Packet::createExpose(sreqHigh);
+            } else {
+                snd_data_pkt = Packet::createValidate(sreqHigh);
+                assert(load_inst->vldData);
+                snd_data_pkt->dataStatic(&(load_inst->vldData[1]));
+            }
+
+            data_pkt->senderState = state;
+            data_pkt->setFirst();
+            snd_data_pkt->senderState = state;
+            data_pkt->reqIdx = loadVLDIdx;
+            snd_data_pkt->reqIdx = loadVLDIdx;
+
+            data_pkt->isSplit = true;
+            snd_data_pkt->isSplit = true;
+            state->isSplit = true;
+            state->outstanding = 2;
+            state->mainPkt = data_pkt;
+
+            DPRINTF(LSQUnit, "contextid = %d, %d\n",
+                    sreqLow->contextId(), sreqHigh->contextId());
+            req = sreqLow;
+        }
+
+        assert(!req->isStrictlyOrdered());
+        assert(!req->isMmappedIpr());
+
+        DPRINTF(LSQUnit, "D-Cache: Validating/Exposing load idx:%i PC:%s "
+                "to Addr:%#x, data:%#x [sn:%lli]\n",
+                loadVLDIdx, load_inst->pcState(),
+                //FIXME: resultData not memData
+                req->getPaddr(), (int)*(load_inst->memData),
+                load_inst->seqNum);
+
+        bool successful_expose = true;
+        bool completedFirst = false;
+
+        if (!dcachePort->sendTimingReq(data_pkt)){
+            DPRINTF(IEW, "D-Cache became blocked when "
+                "validating [sn:%lli], will retry later\n",
+                load_inst->seqNum);
+            successful_expose = false;
+        } else {
+            if (split) {
+                // If split, try to send the second packet too
+                completedFirst = true;
+                assert(snd_data_pkt);
+
+                if (!dcachePort->sendTimingReq(snd_data_pkt)){
+                    state->complete();
+                    state->cacheBlocked = true;
+                    successful_expose = false;
+                    DPRINTF(IEW, "D-Cache became blocked when validating"
+                        " [sn:%lli] second packet, will retry later\n",
+                        load_inst->seqNum);
+                }
+            }
+        }
+
+        if (!successful_expose){
+            if (!split) {
+                delete state;
+                delete data_pkt;
+            }else{
+                if (!completedFirst){
+                    delete state;
+                    delete data_pkt;
+                    delete snd_data_pkt;
+                } else {
+                    delete snd_data_pkt;
+                }
+            }
+            //cpu->wakeCPU();  // This will cause issue(wrong activity count and affects the memory transactions
+            ++lsqCacheBlocked;
+            break;
+        } else {
+            // Here is to fix memory leakage
+            // it is ugly, but we have to do it now.
+            load_inst->needDeletePostReq(false);
+
+            // if all the packets we sent out is expose,
+            // we assume the expose is alreay completed
+            if (onlyExpose) {
+                load_inst->setExposeCompleted();
+                numExposes++;
+            } else {
+                numValidates++;
+            }
+            if (load_inst->needExposeOnly()){
+                numConvertedExposes++;
+            }
+            if (load_inst->isExecuted() && load_inst->isExposeCompleted()
+                    && !load_inst->isSquashed()){
+                DPRINTF(LSQUnit, "Expose finished. Execution done."
+                    "Send inst [sn:%lli] to commit stage.\n",
+                    load_inst->seqNum);
+                    iewStage->instToCommit(load_inst);
+                    iewStage->activityThisCycle();
+            } else{
+                DPRINTF(LSQUnit, "Need validation or execution not finishes."
+                    "Need to wait for readResp/validateResp "
+                    "for inst [sn:%lli].\n",
+                    load_inst->seqNum);
+            }
+
+            load_inst->setExposeSent();
+            --loadsToVLD;
+            incrLdIdx(loadVLDIdx);
+            if (!split){
+                setSpecBuffState(req);
+            } else {
+                setSpecBuffState(sreqLow);
+                setSpecBuffState(sreqHigh);
+            }
+        }
+    }
+
+    DPRINTF(LSQUnit, "Send validate/expose for %d insts. loadsToVLD=%d"
+            ". loadHead=%d. loadTail=%d.\n",
+            old_loadsToVLD-loadsToVLD, loadsToVLD, loadHead,
+            loadTail);
+
+    assert(loads>=0 && loadsToVLD >= 0);
+
+    return old_loadsToVLD-loadsToVLD;
+}
+
+
+
 
 template <class Impl>
 void
@@ -799,7 +1367,7 @@ LSQUnit<Impl>::writebackStores()
 
         if (isStoreBlocked) {
             DPRINTF(LSQUnit, "Unable to write back any more stores, cache"
-                    " is blocked!\n");
+                    " is blocked on stores!\n");
             break;
         }
 
@@ -1013,6 +1581,12 @@ LSQUnit<Impl>::squash(const InstSeqNum &squashed_num)
             stallingLoadIdx = 0;
         }
 
+        if (loadQueue[load_idx]->needPostFetch() &&
+                loadQueue[load_idx]->readyToExpose() &&
+                !loadQueue[load_idx]->isExposeSent()){
+            loadsToVLD --;
+        }
+
         // Clear the smart pointer to make sure it is decremented.
         loadQueue[load_idx]->setSquashed();
         loadQueue[load_idx] = NULL;
@@ -1023,6 +1597,7 @@ LSQUnit<Impl>::squash(const InstSeqNum &squashed_num)
 
         decrLdIdx(load_idx);
         ++lsqSquashedLoads;
+
     }
 
     if (memDepViolator && squashed_num < memDepViolator->seqNum) {
@@ -1081,6 +1656,10 @@ LSQUnit<Impl>::squash(const InstSeqNum &squashed_num)
     }
 }
 
+
+// after sent, we assume the store is complete
+// thus, we can wekeup and forward data
+// In TSO, mark inFlightStore as true to block following stores [mengjia]
 template <class Impl>
 void
 LSQUnit<Impl>::storePostSend(PacketPtr pkt)
@@ -1110,7 +1689,56 @@ LSQUnit<Impl>::storePostSend(PacketPtr pkt)
         storeInFlight = true;
     }
 
+    DPRINTF(LSQUnit, "Post sending store for inst [sn:%lli]\n",
+            storeQueue[storeWBIdx].inst->seqNum);
     incrStIdx(storeWBIdx);
+}
+
+
+
+template <class Impl>
+void
+LSQUnit<Impl>::completeValidate(DynInstPtr &inst, PacketPtr pkt)
+{
+    iewStage->wakeCPU();
+    // if instruction fault, no need to check value,
+    // return directly
+    //assert(!inst->needExposeOnly());
+    if (inst->isExposeCompleted() || inst->isSquashed()){
+        //assert(inst->fault != NoFault);
+        //Already sent to commit, do nothing
+        return;
+    }
+    //Check validation result
+    bool validation_fail = false;
+    if (!inst->isL1HitLow() && inst->vldData[0]==0) {
+        validation_fail = true;
+    } else {
+        if (pkt->isSplit && !inst->isL1HitHigh()
+            && inst->vldData[1]==0){
+            validation_fail = true;
+        }
+    }
+    if (validation_fail){
+        // Mark the load for re-execution
+        inst->fault = std::make_shared<ReExec>();
+        inst->validationFail(true);
+        DPRINTF(LSQUnit, "Validation failed.\n",
+        inst->seqNum);
+    }
+
+    inst->setExposeCompleted();
+    if ( inst->isExecuted() && inst->isExposeCompleted() ){
+        DPRINTF(LSQUnit, "Validation finished. Execution done."
+            "Send inst [sn:%lli] to commit stage.\n",
+            inst->seqNum);
+            iewStage->instToCommit(inst);
+            iewStage->activityThisCycle();
+    } else{
+        DPRINTF(LSQUnit, "Validation done. Execution not finishes."
+            "Need to wait for readResp for inst [sn:%lli].\n",
+            inst->seqNum);
+    }
 }
 
 template <class Impl>
@@ -1125,6 +1753,11 @@ LSQUnit<Impl>::writeback(DynInstPtr &inst, PacketPtr pkt)
         ++lsqIgnoredResponses;
         return;
     }
+
+    //DPRINTF(LSQUnit, "write back for inst [sn:%lli]\n", inst->seqNum);
+    assert(!(inst->isExecuted() && inst->isExposeCompleted() &&
+                inst->fault==NoFault) &&
+            "in this case, we will put it into ROB twice.");
 
     if (!inst->isExecuted()) {
         inst->setExecuted();
@@ -1145,8 +1778,42 @@ LSQUnit<Impl>::writeback(DynInstPtr &inst, PacketPtr pkt)
         }
     }
 
-    // Need to insert instruction into queue to commit
-    iewStage->instToCommit(inst);
+    // [mengjia]
+    // check schemes to decide whether to set load can be committed
+    // on receiving readResp or readSpecResp
+    if(!isInvisibleSpec){
+        // if not invisibleSpec mode, we only receive readResp
+        assert(!pkt->isSpec() && !pkt->isValidate() &&
+                "Receiving spec or validation response "
+                "in non invisibleSpec mode");
+        iewStage->instToCommit(inst);
+    } else if (inst->fault != NoFault){
+        inst->setExposeCompleted();
+        inst->setExposeSent();
+        iewStage->instToCommit(inst);
+    } else {
+        //isInvisibleSpec == true
+        if (pkt->isSpec()) {
+            inst->setSpecCompleted();
+        }
+
+        assert(!pkt->isValidate() && "receiving validation response"
+                "in invisibleSpec RC mode");
+        assert(!pkt->isExpose() && "receiving expose response"
+                "on write back path");
+
+        // check whether the instruction can be committed
+        if ( !inst->isExposeCompleted() && inst->needPostFetch() ){
+            DPRINTF(LSQUnit, "Expose not finished. "
+                "Wait until expose completion"
+                " to send inst [sn:%lli] to commit stage\n", inst->seqNum);
+        }else{
+            DPRINTF(LSQUnit, "Expose and execution both finished. "
+                "Send inst [sn:%lli] to commit stage\n", inst->seqNum);
+            iewStage->instToCommit(inst);
+        }
+
+    }
 
     iewStage->activityThisCycle();
 
@@ -1154,6 +1821,8 @@ LSQUnit<Impl>::writeback(DynInstPtr &inst, PacketPtr pkt)
     iewStage->checkMisprediction(inst);
 }
 
+// set store to complete [mengjia]
+// complete the store after it commits
 template <class Impl>
 void
 LSQUnit<Impl>::completeStore(int store_idx)
@@ -1229,8 +1898,11 @@ LSQUnit<Impl>::sendStore(PacketPtr data_pkt)
         retryPkt = data_pkt;
         return false;
     }
+    setSpecBuffState(data_pkt->req);
     return true;
 }
+
+
 
 template <class Impl>
 void
@@ -1239,6 +1911,7 @@ LSQUnit<Impl>::recvRetry()
     if (isStoreBlocked) {
         DPRINTF(LSQUnit, "Receiving retry: store blocked\n");
         assert(retryPkt != NULL);
+        assert(retryPkt->isWrite());
 
         LSQSenderState *state =
             dynamic_cast<LSQSenderState *>(retryPkt->senderState);
@@ -1287,7 +1960,7 @@ template <class Impl>
 inline void
 LSQUnit<Impl>::incrLdIdx(int &load_idx) const
 {
-    if (++load_idx >= LQEntries)
+    if ((++load_idx) >= LQEntries)
         load_idx = 0;
 }
 
@@ -1295,7 +1968,7 @@ template <class Impl>
 inline void
 LSQUnit<Impl>::decrLdIdx(int &load_idx) const
 {
-    if (--load_idx < 0)
+    if ((--load_idx) < 0)
         load_idx += LQEntries;
 }
 

@@ -172,7 +172,7 @@ class RubyPort : public MemObject
     void trySendRetries();
     void ruby_hit_callback(PacketPtr pkt);
     void testDrainComplete();
-    void ruby_eviction_callback(Addr address);
+    void ruby_eviction_callback(Addr address, bool external);
 
     /**
      * Called by the PIO port when receiving a timing response.

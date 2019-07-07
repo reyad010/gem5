@@ -450,6 +450,7 @@ class DefaultCommit
 
     /** The sequence number of the last commited instruction. */
     InstSeqNum lastCommitedSeqNum[Impl::MaxThreads];
+    Tick lastCommitTick;
 
     /** Records if there is a trap currently in flight. */
     bool trapInFlight[Impl::MaxThreads];
@@ -479,6 +480,9 @@ class DefaultCommit
     /** Updates commit stats based on this instruction. */
     void updateComInstStats(DynInstPtr &inst);
 
+    /** [InvisiSpec] Updates squash stats based on this instruction. */
+    void updateSquashStats(DynInstPtr &inst);
+
     /** Stat for the total number of squashed instructions discarded by commit.
      */
     Stats::Scalar commitSquashedInsts;
@@ -488,6 +492,19 @@ class DefaultCommit
     Stats::Scalar commitNonSpecStalls;
     /** Stat for the total number of branch mispredicts that caused a squash. */
     Stats::Scalar branchMispredicts;
+
+    // [InvisiSpec] count #squash
+    /** Stat for the total number of invalidation packets
+     * that caused a squash. */
+    Stats::Scalar loadHitInvalidations;
+    Stats::Scalar loadHitExternalEvictions;
+    /** Stat for the total number of failed validations
+     * that caused a squash. */
+    Stats::Scalar loadValidationFails;
+    // [InvisiSpec] count cycles stall due to waiting for
+    // validation responses
+    Stats::Scalar validationStalls;
+
     /** Distribution of the number of committed instructions each cycle. */
     Stats::Distribution numCommittedDist;
 

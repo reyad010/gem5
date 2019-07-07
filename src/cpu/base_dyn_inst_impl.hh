@@ -87,6 +87,7 @@ void
 BaseDynInst<Impl>::initVars()
 {
     memData = NULL;
+    vldData = NULL;
     effAddr = 0;
     physEffAddrLow = 0;
     physEffAddrHigh = 0;
@@ -132,6 +133,9 @@ BaseDynInst<Impl>::initVars()
 #endif
 
     reqToVerify = NULL;
+    postReq = NULL;
+    postSreqLow = NULL;
+    postSreqHigh = NULL;
 }
 
 template <class Impl>
@@ -139,6 +143,10 @@ BaseDynInst<Impl>::~BaseDynInst()
 {
     if (memData) {
         delete [] memData;
+    }
+
+    if (vldData) {
+        delete [] vldData;
     }
 
     if (traceData) {
@@ -160,6 +168,19 @@ BaseDynInst<Impl>::~BaseDynInst()
 
     if (reqToVerify)
         delete reqToVerify;
+
+    if (needDeletePostReq()){
+        if (postReq){
+            delete postReq;
+            postReq = NULL;
+        }
+        if (postSreqLow) {
+            delete postSreqLow;
+            delete postSreqHigh;
+            postSreqLow = NULL;
+            postSreqHigh = NULL;
+        }
+    }
 }
 
 #ifdef DEBUG

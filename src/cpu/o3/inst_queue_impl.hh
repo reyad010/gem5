@@ -1172,8 +1172,19 @@ InstructionQueue<Impl>::getDeferredMemInstToExecute()
 {
     for (ListIt it = deferredMemInsts.begin(); it != deferredMemInsts.end();
          ++it) {
-        if ((*it)->translationCompleted() || (*it)->isSquashed()) {
+        // [InvisiSpec] we need to check the FenceDelay
+        // a load can be delayed due to
+        // 1. translation delay
+        // 2. virtual fence ahead
+        // 3. not ready to expose and gets a TLB miss
+        // for both (2, 3) we need to restart the translation
+        if ( (*it)->translationCompleted() 
+                || ((*it)->onlyWaitForFence() && !(*it)->fenceDelay())
+                || ((*it)->onlyWaitForExpose() && (*it)->readyToExpose())
+                || (*it)->isSquashed()) {
             DynInstPtr mem_inst = *it;
+            mem_inst->onlyWaitForFence(false);
+            mem_inst->onlyWaitForExpose(false);
             deferredMemInsts.erase(it);
             return mem_inst;
         }

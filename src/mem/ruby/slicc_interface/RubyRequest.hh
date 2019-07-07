@@ -60,6 +60,7 @@ class RubyRequest : public Message
     int m_wfid;
     HSAScope m_scope;
     HSASegment m_segment;
+    int m_idx;
 
 
     RubyRequest(Tick curTime, uint64_t _paddr, uint8_t* _data, int _len,
@@ -82,6 +83,11 @@ class RubyRequest : public Message
           m_segment(_segment)
     {
         m_LineAddress = makeLineAddress(m_PhysicalAddress);
+        if (_pkt->reqIdx == -1) {
+            m_idx = _pkt->reqIdx;
+        } else {
+            m_idx = (_pkt->reqIdx) * 2 + (_pkt->isFirst()? 0 : 1);
+        }
     }
 
     RubyRequest(Tick curTime, uint64_t _paddr, uint8_t* _data, int _len,
@@ -109,6 +115,11 @@ class RubyRequest : public Message
           m_segment(_segment)
     {
         m_LineAddress = makeLineAddress(m_PhysicalAddress);
+        if (_pkt->reqIdx == -1) {
+            m_idx = _pkt->reqIdx;
+        } else {
+            m_idx = (_pkt->reqIdx) * 2 + (_pkt->isFirst()? 0 : 1);
+        }
     }
 
     RubyRequest(Tick curTime, uint64_t _paddr, uint8_t* _data, int _len,
@@ -137,6 +148,11 @@ class RubyRequest : public Message
           m_segment(_segment)
     {
         m_LineAddress = makeLineAddress(m_PhysicalAddress);
+        if (_pkt->reqIdx == -1) {
+            m_idx = _pkt->reqIdx;
+        } else {
+            m_idx = (_pkt->reqIdx) * 2 + (_pkt->isFirst()? 0 : 1);
+        }
     }
 
 

@@ -136,6 +136,23 @@ class LSQ {
     /** Same as above, but only for one thread. */
     void writebackStores(ThreadID tid);
 
+
+    /** [mengjia]
+     * Attempts to validate loads until all cache ports are used or the
+     * interface becomes blocked.
+     */
+    int exposeLoads();
+    /** Same as above, but only for one thread. */
+    int exposeLoads(ThreadID tid);
+
+    /** [mengjia]
+     * attempt to update FenceDelay state for load insts
+     */
+    void updateVisibleState();
+    /** Same as above, but only for one thread. */
+    void updateVisibleState(ThreadID tid);
+
+
     /**
      * Squash instructions from a thread until the specified sequence number.
      */
@@ -256,6 +273,10 @@ class LSQ {
     /** Returns the number of stores a specific thread has to write back. */
     int numStoresToWB(ThreadID tid)
     { return thread[tid].numStoresToWB(); }
+
+    /** Returns the number of stores a specific thread has to write back. */
+    int numLoadsToVLD(ThreadID tid)
+    { return thread[tid].numLoadsToVLD(); }
 
     /** Returns if the LSQ will write back to memory this cycle. */
     bool willWB();

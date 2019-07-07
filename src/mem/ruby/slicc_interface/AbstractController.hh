@@ -129,7 +129,7 @@ class AbstractController : public MemObject, public Consumer
     BaseMasterPort& getMasterPort(const std::string& if_name,
                                   PortID idx = InvalidPortID);
 
-    void queueMemoryRead(const MachineID &id, Addr addr, Cycles latency);
+    void queueMemoryRead(const MachineID &id, Addr addr, Cycles latency, MachineID origin, int idx, int type);
     void queueMemoryWrite(const MachineID &id, Addr addr, Cycles latency,
                           const DataBlock &block);
     void queueMemoryWritePartial(const MachineID &id, Addr addr, Cycles latency,
@@ -199,6 +199,8 @@ class AbstractController : public MemObject, public Consumer
     //! Counter for the number of cycles when the transitions carried out
     //! were equal to the maximum allowed
     Stats::Scalar m_fully_busy_cycles;
+    Stats::Scalar m_expose_hits;
+    Stats::Scalar m_expose_misses;
 
     //! Histogram for profiling delay for the messages this controller
     //! cares for
@@ -250,6 +252,9 @@ class AbstractController : public MemObject, public Consumer
     {
         // Id of the machine from which the request originated.
         MachineID id;
+        int type;
+        int coreId;
+        int sbeId;
 
         SenderState(MachineID _id) : id(_id)
         {}
@@ -258,6 +263,14 @@ class AbstractController : public MemObject, public Consumer
   private:
     /** The address range to which the controller responds on the CPU side. */
     const AddrRangeList addrRanges;
+
+    struct SBE
+    {
+      Addr address;
+      DataBlock data;
+    };
+
+    SBE m_specBuf[8][66];
 };
 
 #endif // __MEM_RUBY_SLICC_INTERFACE_ABSTRACTCONTROLLER_HH__

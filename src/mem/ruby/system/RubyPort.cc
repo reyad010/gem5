@@ -246,6 +246,7 @@ RubyPort::PioSlavePort::recvAtomic(PacketPtr pkt)
     panic("Could not find address in Ruby PIO address ranges!\n");
 }
 
+// [InvisiSpec] Request on the way from CPU to Ruby
 bool
 RubyPort::MemSlavePort::recvTimingReq(PacketPtr pkt)
 {
@@ -428,6 +429,7 @@ RubyPort::MemSlavePort::recvFunctional(PacketPtr pkt)
     }
 }
 
+// [InvisiSpec] On the way from Ruby to CPU
 void
 RubyPort::ruby_hit_callback(PacketPtr pkt)
 {
@@ -511,6 +513,7 @@ RubyPort::drain()
     }
 }
 
+// [InvisiSpec] Still on the way from Ruby to CPU
 void
 RubyPort::MemSlavePort::hitCallback(PacketPtr pkt)
 {
@@ -544,7 +547,7 @@ RubyPort::MemSlavePort::hitCallback(PacketPtr pkt)
     }
 
     // Flush, acquire, release requests don't access physical memory
-    if (pkt->isFlush() || pkt->cmd == MemCmd::MemFenceReq) {
+    if (pkt->isFlush() || pkt->isExpose() || pkt->cmd == MemCmd::MemFenceReq) {
         accessPhysMem = false;
     }
 
@@ -571,6 +574,7 @@ RubyPort::MemSlavePort::hitCallback(PacketPtr pkt)
         // Ruby protocol.
         schedTimingResp(pkt, curTick());
     } else {
+        // [InvisiSpec] Delete the packet if a reponse is not required
         delete pkt;
     }
 
@@ -601,7 +605,7 @@ RubyPort::MemSlavePort::isPhysMemAddress(Addr addr) const
 }
 
 void
-RubyPort::ruby_eviction_callback(Addr address)
+RubyPort::ruby_eviction_callback(Addr address, bool external)
 {
     DPRINTF(RubyPort, "Sending invalidations.\n");
     // Allocate the invalidate request and packet on the stack, as it is
@@ -612,6 +616,9 @@ RubyPort::ruby_eviction_callback(Addr address)
     // Use a single packet to signal all snooping ports of the invalidation.
     // This assumes that snooping ports do NOT modify the packet/request
     Packet pkt(&request, MemCmd::InvalidateReq);
+    if (external) {
+        pkt.setExternalEviction();
+    }
     for (CpuPortIter p = slave_ports.begin(); p != slave_ports.end(); ++p) {
         // check if the connected master port is snooping
         if ((*p)->isSnooping()) {

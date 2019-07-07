@@ -176,6 +176,7 @@ MasterPort::sendFunctional(PacketPtr pkt)
     return _slavePort->recvFunctional(pkt);
 }
 
+// [InvisiSpec] Request from CPU to Ruby
 bool
 MasterPort::sendTimingReq(PacketPtr pkt)
 {

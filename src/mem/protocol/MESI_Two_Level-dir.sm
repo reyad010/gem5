@@ -49,6 +49,8 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
 
     M, AccessPermission:Maybe_Stale, desc="memory copy may be stale, i.e. other modified copies may exist";
     IM, AccessPermission:Busy, desc="Intermediate State I>M";
+    IE, AccessPermission:Busy, desc="Intermediate State I>M";
+    II, AccessPermission:Busy, desc="Intermediate State I>I for SpecFetch";
     MI, AccessPermission:Busy, desc="Intermediate State M>I";
     M_DRD, AccessPermission:Busy, desc="Intermediate State when there is a dma read";
     M_DRDI, AccessPermission:Busy, desc="Intermediate State when there is a dma read";
@@ -59,6 +61,8 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
   // Events
   enumeration(Event, desc="Directory events") {
     Fetch, desc="A memory fetch arrives";
+    Expose, desc="A memory expose arrives";
+    SpecFetch, desc="A memory fetch for speculative execution arrives";
     Data, desc="writeback data arrives";
     Memory_Data, desc="Fetched data from memory arrives";
     Memory_Ack, desc="Writeback Ack from memory arrives";
@@ -198,6 +202,10 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
         assert(in_msg.Destination.isElement(machineID));
         if (isGETRequest(in_msg.Type)) {
           trigger(Event:Fetch, in_msg.addr, TBEs[in_msg.addr]);
+        } else if (in_msg.Type == CoherenceRequestType:EXPOSE) {
+          trigger(Event:Expose, in_msg.addr, TBEs[in_msg.addr]);
+        } else if (in_msg.Type == CoherenceRequestType:GETSPEC) {
+          trigger(Event:SpecFetch, in_msg.addr, TBEs[in_msg.addr]);
         } else if (in_msg.Type == CoherenceRequestType:DMA_READ) {
           trigger(Event:DMA_READ, makeLineAddress(in_msg.addr),
                   TBEs[makeLineAddress(in_msg.addr)]);
@@ -275,6 +283,40 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
     }
   }
 
+  action(dex_sendExposeData, "dex", desc="Send data to requestor") {
+    peek(memQueue_in, MemoryMsg) {
+      enqueue(responseNetwork_out, ResponseMsg, to_mem_ctrl_latency) {
+        out_msg.addr := address;
+        out_msg.Type := CoherenceResponseType:MEMORY_DATA;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.OriginalRequestorMachId);
+        out_msg.DataBlk := in_msg.DataBlk;
+        out_msg.Dirty := false;
+        out_msg.MessageSize := MessageSizeType:EXPOSE_Data;
+
+        Entry e := getDirectoryEntry(in_msg.addr);
+        e.Owner := in_msg.OriginalRequestorMachId;
+      }
+    }
+  }
+
+  action(ds_sendSpecData, "ds", desc="Send data to requestor") {
+    peek(memQueue_in, MemoryMsg) {
+      enqueue(responseNetwork_out, ResponseMsg, to_mem_ctrl_latency) {
+        out_msg.addr := address;
+        out_msg.Type := CoherenceResponseType:MEMORY_DATA;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.OriginalRequestorMachId);
+        out_msg.DataBlk := in_msg.DataBlk;
+        out_msg.Dirty := false;
+        out_msg.MessageSize := MessageSizeType:SPECLD_Data;
+
+        Entry e := getDirectoryEntry(in_msg.addr);
+        e.Owner := in_msg.OriginalRequestorMachId;
+      }
+    }
+  }
+
   // Actions
   action(aa_sendAck, "aa", desc="Send ack to L2") {
     peek(memQueue_in, MemoryMsg) {
@@ -306,7 +348,19 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
 
   action(qf_queueMemoryFetchRequest, "qf", desc="Queue off-chip fetch request") {
     peek(requestNetwork_in, RequestMsg) {
-      queueMemoryRead(in_msg.Requestor, address, to_mem_ctrl_latency);
+      queueMemoryRead(in_msg.Requestor, address, to_mem_ctrl_latency, in_msg.origin, in_msg.idx, 0);
+    }
+  }
+
+  action(qfs_queueMemorySpecFetchRequest, "qfs", desc="Queue off-chip fetch request") {
+    peek(requestNetwork_in, RequestMsg) {
+      queueMemoryRead(in_msg.Requestor, address, to_mem_ctrl_latency, in_msg.origin, in_msg.idx, 1);
+    }
+  }
+
+  action(qfe_queueMemoryExposeRequest, "qfe", desc="Queue off-chip fetch request") {
+    peek(requestNetwork_in, RequestMsg) {
+      queueMemoryRead(in_msg.Requestor, address, to_mem_ctrl_latency, in_msg.origin, in_msg.idx, 2);
     }
   }
 
@@ -320,7 +374,8 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
 //added by SS for dma
   action(qf_queueMemoryFetchRequestDMA, "qfd", desc="Queue off-chip fetch request") {
     peek(requestNetwork_in, RequestMsg) {
-      queueMemoryRead(in_msg.Requestor, address, to_mem_ctrl_latency);
+      assert(false);
+      queueMemoryRead(in_msg.Requestor, address, to_mem_ctrl_latency, in_msg.Requestor, -1, -1);
     }
   }
 
@@ -425,7 +480,18 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
     j_popIncomingRequestQueue;
   }
 
-  transition(M, Fetch) {
+  transition(I, Expose, IE) {
+    qfe_queueMemoryExposeRequest;
+    j_popIncomingRequestQueue;
+  }
+
+  transition(I, SpecFetch, II) {
+    qfs_queueMemorySpecFetchRequest;
+    j_popIncomingRequestQueue;
+  }
+
+  // [InvisiSpec] Is it secure?
+  transition(M, {Fetch, Expose, SpecFetch}) {
     inv_sendCacheInvalidate;
     z_stallAndWaitRequest;
   }
@@ -435,6 +501,19 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
     l_popMemQueue;
     kd_wakeUpDependents;
   }
+
+  transition(IE, Memory_Data, M) {
+    dex_sendExposeData;
+    l_popMemQueue;
+    kd_wakeUpDependents;
+  }
+
+  transition(II, Memory_Data, I) {
+    ds_sendSpecData;
+    l_popMemQueue;
+    kd_wakeUpDependents;
+  }
+
 //added by SS
   transition(M, CleanReplacement, I) {
     a_sendAck;
@@ -481,11 +560,11 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
     kd_wakeUpDependents;
   }
 
-  transition({ID, ID_W, M_DRDI, M_DWRI, IM, MI}, {Fetch, Data} ) {
+  transition({ID, ID_W, M_DRDI, M_DWRI, IM, IE, MI, II}, {Fetch, Expose, SpecFetch, Data} ) {
     z_stallAndWaitRequest;
   }
 
-  transition({ID, ID_W, M_DRD, M_DRDI, M_DWR, M_DWRI, IM, MI}, {DMA_WRITE, DMA_READ} ) {
+  transition({ID, ID_W, M_DRD, M_DRDI, M_DWR, M_DWRI, IM, IE, MI, II}, {DMA_WRITE, DMA_READ} ) {
     zz_recycleDMAQueue;
   }
 

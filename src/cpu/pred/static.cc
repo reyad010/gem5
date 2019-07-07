@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2005 Mark D. Hill and David A. Wood
+ * Copyright (c) 2004-2006 The Regents of The University of Michigan
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,25 +24,40 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Authors: Kevin Lim
  */
 
-// Hack, no node object since base class has them
-NodeID version;
-MachineID machineID;
-NodeID clusterID;
-Cycles recycle_latency;
+#include "cpu/pred/static.hh"
 
-// Functions implemented in the AbstractController class for
-// making timing access to the memory maintained by the
-// memory controllers.
-void queueMemoryRead(MachineID id, Addr addr, Cycles latency, MachineID origin, int idx, int type);
-void queueMemoryWrite(MachineID id, Addr addr, Cycles latency,
-                      DataBlock block);
-void queueMemoryWritePartial(MachineID id, Addr addr, Cycles latency,
-                             DataBlock block, int size);
+StaticBP::StaticBP(const StaticBPParams *params)
+    : BPredUnit(params),
+      staticPrediction(params->staticPrediction)
+{
 
-// Functions implemented in the AbstractController class for
-// making functional access to the memory maintained by the
-// memory controllers.
-void functionalMemoryRead(Packet *pkt);
-bool functionalMemoryWrite(Packet *pkt);
+}
+
+void
+StaticBP::btbUpdate(ThreadID tid, Addr branch_addr, void * &bp_history)
+{
+// Place holder for a function that is called to update predictor history when
+// a BTB entry is invalid or not found.
+}
+
+
+bool
+StaticBP::lookup(ThreadID tid, Addr branch_addr, void * &bp_history)
+{
+    return staticPrediction;
+}
+
+void
+StaticBP::uncondBranch(ThreadID tid, Addr pc, void *&bp_history)
+{
+}
+
+StaticBP*
+StaticBPParams::create()
+{
+    return new StaticBP(this);
+}

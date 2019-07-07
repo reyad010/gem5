@@ -86,6 +86,35 @@ def cpu_names():
     """Return a list of valid CPU names."""
     return _cpu_classes.keys()
 
+# [InvisiSpec] add knob to configure the CPU modes/simulation schemes
+def config_scheme(cpu_cls, cpu_list, options):
+    if issubclass(cpu_cls, m5.objects.DerivO3CPU):
+        # Assign the same file name to all cpus for now.
+        if options.needsTSO==None or options.scheme==None:
+            fatal("Need to provide needsTSO and scheme "
+                "to run simulation with DerivO3CPU")
+
+        print "**********"
+        print "info: Configure for DerivO3CPU. needsTSO=%d; scheme=%s"\
+            % (options.needsTSO, options.scheme)
+        print "**********"
+        for cpu in cpu_list:
+            if options.needsTSO:
+                cpu.needsTSO = True
+            else:
+                cpu.needsTSO = False
+
+            if options.allowSpecBuffHit:
+                cpu.allowSpecBuffHit = True
+            else:
+                cpu.allowSpecBuffHit = False
+            if len(options.scheme)!=0:
+                cpu.simulateScheme = options.scheme
+    else:
+        print "not DerivO3CPU"
+
+
+
 def config_etrace(cpu_cls, cpu_list, options):
     if issubclass(cpu_cls, m5.objects.DerivO3CPU):
         # Assign the same file name to all cpus for now. This must be

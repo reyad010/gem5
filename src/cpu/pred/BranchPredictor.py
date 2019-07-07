@@ -53,6 +53,15 @@ class BranchPredictor(SimObject):
 
 
 
+class StaticBP(BranchPredictor):
+    type = 'StaticBP'
+    cxx_class = 'StaticBP'
+    cxx_header = "cpu/pred/static.hh"
+
+    staticPrediction = Param.Bool(False, "Static prediction")
+
+
+
 class LocalBP(BranchPredictor):
     type = 'LocalBP'
     cxx_class = 'LocalBP'

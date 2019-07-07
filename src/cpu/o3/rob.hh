@@ -212,6 +212,10 @@ class ROB
     /** Updates the tail instruction with the new youngest instruction. */
     void updateTail();
 
+    /** [SafeSpce] Updates load instructions visible condition
+     *  set isPrevInstsCompleted and isPrevBrsResolved. */
+    void updateVisibleState();
+
     /** Reads the PC of the oldest head instruction. */
 //    uint64_t readHeadPC();
 

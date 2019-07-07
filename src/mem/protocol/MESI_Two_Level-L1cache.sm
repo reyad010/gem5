@@ -76,10 +76,12 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     S, AccessPermission:Read_Only, desc="a L1 cache entry Shared";
     E, AccessPermission:Read_Only, desc="a L1 cache entry Exclusive";
     M, AccessPermission:Read_Write, desc="a L1 cache entry Modified", format="!b";
+    X, AccessPermission:Read_Only, desc="a L1 cache entry Speculatively observed";
 
     // Transient States
     IS, AccessPermission:Busy, desc="L1 idle, issued GETS, have not seen response yet";
     IM, AccessPermission:Busy, desc="L1 idle, issued GETX, have not seen response yet";
+    IX, AccessPermission:Busy, desc="L1 idle, issued GETSPEC, have not seen response yet";
     SM, AccessPermission:Read_Only, desc="L1 idle, issued GETX, have not seen response yet";
     IS_I, AccessPermission:Busy, desc="L1 idle, issued GETS, saw Inv before data because directory doesn't block on GETS hit";
 
@@ -99,6 +101,8 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     Load,            desc="Load request from the home processor";
     Ifetch,          desc="I-fetch request from the home processor";
     Store,           desc="Store request from the home processor";
+    SpecLoad,        desc="SpecLoad request from the home processor";
+    Expose,          desc="Expose request from the home processor";
 
     Inv,           desc="Invalidate request from L2 bank";
 
@@ -109,6 +113,8 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     Fwd_GETX,   desc="GETX from other processor";
     Fwd_GETS,   desc="GETS from other processor";
     Fwd_GET_INSTR,   desc="GET_INSTR from other processor";
+    Fwd_GETSPEC,   desc="GETSPEC from other processor";
+    Fwd_EXPOSE,   desc="EXPOSE from other processor";
 
     Data,       desc="Data for processor";
     Data_Exclusive,       desc="Data for processor";
@@ -187,6 +193,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   }
 
   State getState(TBE tbe, Entry cache_entry, Addr addr) {
+    // [InvisiSpec] The same cache line cannot be present in L1D and L1I at the same time.
     assert((L1Dcache.isTagPresent(addr) && L1Icache.isTagPresent(addr)) == false);
 
     if(is_valid(tbe)) {
@@ -264,6 +271,10 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
       return Event:Ifetch;
     } else if ((type == RubyRequestType:ST) || (type == RubyRequestType:ATOMIC)) {
       return Event:Store;
+    } else if (type == RubyRequestType:SPEC_LD) {
+      return Event:SpecLoad;
+    } else if (type == RubyRequestType:EXPOSE) {
+      return Event:Expose;
     } else {
       error("Invalid RubyRequestType");
     }
@@ -386,6 +397,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
           trigger(Event:Data_Exclusive, in_msg.addr, cache_entry, tbe);
         } else if(in_msg.Type == CoherenceResponseType:DATA) {
           if ((getState(tbe, cache_entry, in_msg.addr) == State:IS ||
+               getState(tbe, cache_entry, in_msg.addr) == State:IX ||
                getState(tbe, cache_entry, in_msg.addr) == State:IS_I ||
                getState(tbe, cache_entry, in_msg.addr) == State:PF_IS ||
                getState(tbe, cache_entry, in_msg.addr) == State:PF_IS_I) &&
@@ -432,6 +444,10 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
           trigger(Event:Fwd_GETS, in_msg.addr, cache_entry, tbe);
         } else if (in_msg.Type == CoherenceRequestType:GET_INSTR) {
           trigger(Event:Fwd_GET_INSTR, in_msg.addr, cache_entry, tbe);
+        } else if (in_msg.Type == CoherenceRequestType:GETSPEC) {
+          trigger(Event:Fwd_GETSPEC, in_msg.addr, cache_entry, tbe);
+        } else if (in_msg.Type == CoherenceRequestType:EXPOSE) {
+          trigger(Event:Fwd_EXPOSE, in_msg.addr, cache_entry, tbe);
         } else {
           error("Invalid forwarded request type");
         }
@@ -533,6 +549,43 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
         out_msg.MessageSize := MessageSizeType:Control;
         out_msg.Prefetch := in_msg.Prefetch;
         out_msg.AccessMode := in_msg.AccessMode;
+        out_msg.idx := in_msg.idx;
+      }
+    }
+  }
+
+  action(as_issueGETSPEC, "as", desc="Issue GETSPEC") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      enqueue(requestL1Network_out, RequestMsg, l1_request_latency) {
+        out_msg.addr := address;
+        out_msg.Type := CoherenceRequestType:GETSPEC;
+        out_msg.Requestor := machineID;
+        out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+        DPRINTF(RubySlicc, "address: %#x, destination: %s\n",
+                address, out_msg.Destination);
+        out_msg.MessageSize := MessageSizeType:SPECLD_Control;
+        out_msg.Prefetch := in_msg.Prefetch;
+        out_msg.AccessMode := in_msg.AccessMode;
+        out_msg.idx := in_msg.idx;
+      }
+    }
+  }
+
+  action(ex_issueEXPOSE, "ex", desc="Issue EXPOSE") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      enqueue(requestL1Network_out, RequestMsg, l1_request_latency) {
+        out_msg.addr := address;
+        out_msg.Type := CoherenceRequestType:EXPOSE;
+        out_msg.Requestor := machineID;
+        out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+        DPRINTF(RubySlicc, "address: %#x, destination: %s\n",
+                address, out_msg.Destination);
+        out_msg.MessageSize := MessageSizeType:EXPOSE_Control;
+        out_msg.Prefetch := in_msg.Prefetch;
+        out_msg.AccessMode := in_msg.AccessMode;
+        out_msg.idx := in_msg.idx;
       }
     }
   }
@@ -567,6 +620,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
         out_msg.MessageSize := MessageSizeType:Control;
         out_msg.Prefetch := in_msg.Prefetch;
         out_msg.AccessMode := in_msg.AccessMode;
+        out_msg.idx := in_msg.idx;
       }
     }
   }
@@ -605,6 +659,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
         out_msg.MessageSize := MessageSizeType:Control;
         out_msg.Prefetch := in_msg.Prefetch;
         out_msg.AccessMode := in_msg.AccessMode;
+        out_msg.idx := in_msg.idx;
       }
     }
   }
@@ -642,6 +697,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
         out_msg.MessageSize := MessageSizeType:Control;
         out_msg.Prefetch := in_msg.Prefetch;
         out_msg.AccessMode := in_msg.AccessMode;
+        out_msg.idx := in_msg.idx;
       }
     }
   }
@@ -661,6 +717,36 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     }
   }
 
+  action(dex_sendDataToExposeRequestor, "dex", desc="send data to requestor") {
+    peek(requestL1Network_in, RequestMsg) {
+      enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+        assert(is_valid(cache_entry));
+        out_msg.addr := address;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.DataBlk := cache_entry.DataBlk;
+        out_msg.Dirty := cache_entry.Dirty;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:EXPOSE_Data;
+      }
+    }
+  }
+
+  action(ds_sendDataToSpecRequestor, "ds", desc="send data to requestor") {
+    peek(requestL1Network_in, RequestMsg) {
+      enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+        assert(is_valid(cache_entry));
+        out_msg.addr := address;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.DataBlk := cache_entry.DataBlk;
+        out_msg.Dirty := cache_entry.Dirty;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:SPECLD_Data;
+      }
+    }
+  }
+
   action(d2_sendDataToL2, "d2", desc="send data to the L2 cache because of M downgrade") {
     enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
       assert(is_valid(cache_entry));
@@ -672,6 +758,20 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
       out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
                           l2_select_low_bit, l2_select_num_bits, intToID(0)));
       out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
+
+  action(d2ex_sendExposeDataToL2, "d2ex", desc="send data to the L2 cache because of M downgrade") {
+    enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+      assert(is_valid(cache_entry));
+      out_msg.addr := address;
+      out_msg.Type := CoherenceResponseType:DATA;
+      out_msg.DataBlk := cache_entry.DataBlk;
+      out_msg.Dirty := cache_entry.Dirty;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+      out_msg.MessageSize := MessageSizeType:EXPOSE_Data;
     }
   }
 
@@ -690,6 +790,36 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     }
   }
 
+  action(dtex_sendDataToExposeRequestor_fromTBE, "dtex", desc="send data to requestor") {
+    peek(requestL1Network_in, RequestMsg) {
+      enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+        assert(is_valid(tbe));
+        out_msg.addr := address;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.DataBlk := tbe.DataBlk;
+        out_msg.Dirty := tbe.Dirty;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:EXPOSE_Data;
+      }
+    }
+  }
+
+  action(dts_sendDataToSpecRequestor_fromTBE, "dts", desc="send data to requestor") {
+    peek(requestL1Network_in, RequestMsg) {
+      enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+        assert(is_valid(tbe));
+        out_msg.addr := address;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.DataBlk := tbe.DataBlk;
+        out_msg.Dirty := tbe.Dirty;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:SPECLD_Data;
+      }
+    }
+  }
+
   action(d2t_sendDataToL2_fromTBE, "d2t", desc="send data to the L2 cache") {
     enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
       assert(is_valid(tbe));
@@ -701,6 +831,20 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
       out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
                           l2_select_low_bit, l2_select_num_bits, intToID(0)));
       out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
+
+  action(d2tex_sendExposeDataToL2_fromTBE, "d2tex", desc="send data to the L2 cache") {
+    enqueue(responseL1Network_out, ResponseMsg, l1_response_latency) {
+      assert(is_valid(tbe));
+      out_msg.addr := address;
+      out_msg.Type := CoherenceResponseType:DATA;
+      out_msg.DataBlk := tbe.DataBlk;
+      out_msg.Dirty := tbe.Dirty;
+      out_msg.Sender := machineID;
+      out_msg.Destination.add(mapAddressToRange(address, MachineType:L2Cache,
+                          l2_select_low_bit, l2_select_num_bits, intToID(0)));
+      out_msg.MessageSize := MessageSizeType:EXPOSE_Data;
     }
   }
 
@@ -760,7 +904,14 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   action(forward_eviction_to_cpu, "\cc", desc="sends eviction information to the processor") {
     if (send_evictions) {
       DPRINTF(RubySlicc, "Sending invalidation for %#x to the CPU\n", address);
-      sequencer.evictionCallback(address);
+      sequencer.evictionCallback(address, false);
+    }
+  }
+
+  action(forward_external_eviction_to_cpu, "\ccc", desc="sends external eviction information to the processor") {
+    if (send_evictions) {
+      DPRINTF(RubySlicc, "Sending invalidation for %#x to the CPU\n", address);
+      sequencer.evictionCallback(address, true);
     }
   }
 
@@ -821,6 +972,14 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     sequencer.readCallback(address, cache_entry.DataBlk);
   }
 
+  action(h_spec_load_hit, "hs",
+         desc="Notify sequencer the spec load completed.")
+  {
+    assert(is_valid(cache_entry));
+    DPRINTF(RubySlicc, "%s\n", cache_entry.DataBlk);
+    sequencer.readCallback(address, cache_entry.DataBlk);
+  }
+
   action(h_ifetch_hit, "hi", desc="Notify sequencer the instruction fetch completed.")
   {
     assert(is_valid(cache_entry));
@@ -836,6 +995,15 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     L1Icache.setMRU(address);
     L1Dcache.setMRU(address);
     sequencer.readCallback(address, cache_entry.DataBlk, true);
+  }
+
+  action(hsx_spec_load_hit, "hsx", desc="Notify sequencer the external load completed.")
+  {
+    peek(responseL1Network_in, ResponseMsg) {
+      // [InvisiSpec] Hack for in_msg.DataBlk returning const DataBlk
+      tbe.DataBlk := in_msg.DataBlk;
+      sequencer.readCallback(address, tbe.DataBlk, true);
+    }
   }
 
   action(hh_store_hit, "\h", desc="Notify sequencer that store completed.")
@@ -865,6 +1033,14 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     tbe.isPrefetch := false;
     tbe.Dirty := cache_entry.Dirty;
     tbe.DataBlk := cache_entry.DataBlk;
+  }
+
+  action(iw_allocateTBEWithoutCacheEntry, "iw", desc="Allocate TBE without a cache entry") {
+    check_allocate(TBEs);
+    assert(!is_valid(cache_entry) || cache_entry.CacheState == State:I);
+    TBEs.allocate(address);
+    set_tbe(TBEs[address]);
+    tbe.isPrefetch := false;
   }
 
   action(k_popMandatoryQueue, "k", desc="Pop mandatory queue.") {
@@ -975,13 +1151,19 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
       cache_entry.isPrefetch := true;
   }
 
+  action(x_expose_done, "xd",
+         desc="Notify sequencer the expose completed.")
+  {
+    sequencer.readCallback(address, cache_entry.DataBlk);
+  }
+
 
   //*****************************************************
   // TRANSITIONS
   //*****************************************************
 
   // Transitions for Load/Store/Replacement/WriteBack from transient states
-  transition({IS, IM, IS_I, M_I, SM, SINK_WB_ACK}, {Load, Ifetch, Store, L1_Replacement}) {
+  transition({IS, IM, IX, IS_I, M_I, SM, SINK_WB_ACK}, {Load, Expose, SpecLoad, Ifetch, Store, L1_Replacement}) {
     z_stallAndWaitMandatoryQueue;
   }
 
@@ -989,7 +1171,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     z_stallAndWaitMandatoryQueue;
   }
 
-  transition({PF_IM, PF_SM}, {Load, Ifetch, L1_Replacement}) {
+  transition({PF_IM, PF_SM}, {Load, Expose, SpecLoad, Ifetch, L1_Replacement}) {
     z_stallAndWaitMandatoryQueue;
   }
 
@@ -998,7 +1180,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     ff_deallocateL1CacheBlock;
   }
 
-  transition({S,E,M,IS,IM,SM,IS_I,M_I,SINK_WB_ACK,PF_IS,PF_IM},
+  transition({S,E,M,IS,IM,IX,SM,IS_I,M_I,SINK_WB_ACK,PF_IS,PF_IM},
              {PF_Load, PF_Store, PF_Ifetch}) {
       pq_popPrefetchQueue;
   }
@@ -1012,6 +1194,21 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     k_popMandatoryQueue;
   }
 
+  transition({NP,I}, Expose, IS) {
+    oo_allocateL1DCacheBlock;
+    i_allocateTBE;
+    ex_issueEXPOSE;
+    uu_profileDataMiss;
+    //po_observeMiss;
+    k_popMandatoryQueue;
+  }
+
+  transition({NP,I}, SpecLoad, IX) {
+    iw_allocateTBEWithoutCacheEntry;
+    as_issueGETSPEC;
+    k_popMandatoryQueue;
+  }
+
   transition({NP,I}, PF_Load, PF_IS) {
     oo_allocateL1DCacheBlock;
     i_allocateTBE;
@@ -1019,15 +1216,19 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     pq_popPrefetchQueue;
   }
 
-  transition(PF_IS, Load, IS) {
+  transition(PF_IS, {Load, Expose}, IS) {
     uu_profileDataMiss;
     ppm_observePfMiss;
     k_popMandatoryQueue;
   }
 
-  transition(PF_IS_I, Load, IS_I) {
+  transition(PF_IS_I, {Load, Expose}, IS_I) {
     uu_profileDataMiss;
     ppm_observePfMiss;
+    k_popMandatoryQueue;
+  }
+
+  transition({PF_IS, PF_IS_I}, SpecLoad) {
     k_popMandatoryQueue;
   }
 
@@ -1083,15 +1284,20 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     k_popMandatoryQueue;
   }
 
-  transition({NP, I}, Inv) {
+  transition({NP, I, IX}, Inv) {
     fi_sendInvAck;
     l_popRequestQueue;
   }
 
   // Transitions from Shared
-  transition({S,E,M}, Load) {
+  transition({S,E,M}, {Load, Expose}) {
     h_load_hit;
     uu_profileDataHit;
+    k_popMandatoryQueue;
+  }
+
+  transition({S,E,M}, SpecLoad) {
+    h_spec_load_hit;
     k_popMandatoryQueue;
   }
 
@@ -1114,7 +1320,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   }
 
   transition(S, Inv, I) {
-    forward_eviction_to_cpu;
+    forward_external_eviction_to_cpu;
     fi_sendInvAck;
     l_popRequestQueue;
   }
@@ -1137,13 +1343,13 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
 
   transition(E, Inv, I) {
     // don't send data
-    forward_eviction_to_cpu;
+    forward_external_eviction_to_cpu;
     fi_sendInvAck;
     l_popRequestQueue;
   }
 
   transition(E, Fwd_GETX, I) {
-    forward_eviction_to_cpu;
+    forward_external_eviction_to_cpu;
     d_sendDataToRequestor;
     l_popRequestQueue;
   }
@@ -1151,6 +1357,17 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   transition(E, {Fwd_GETS, Fwd_GET_INSTR}, S) {
     d_sendDataToRequestor;
     d2_sendDataToL2;
+    l_popRequestQueue;
+  }
+
+  transition({E, M}, Fwd_GETSPEC) {
+    ds_sendDataToSpecRequestor;
+    l_popRequestQueue;
+  }
+
+  transition({E, M}, Fwd_EXPOSE, S) {
+    dex_sendDataToExposeRequestor;
+    d2ex_sendExposeDataToL2;
     l_popRequestQueue;
   }
 
@@ -1170,7 +1387,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   }
 
   transition(M, Inv, I) {
-    forward_eviction_to_cpu;
+    forward_external_eviction_to_cpu;
     f_sendDataToL2;
     l_popRequestQueue;
   }
@@ -1181,7 +1398,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   }
 
   transition(M, Fwd_GETX, I) {
-    forward_eviction_to_cpu;
+    forward_external_eviction_to_cpu;
     d_sendDataToRequestor;
     l_popRequestQueue;
   }
@@ -1200,6 +1417,17 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
   transition(M_I, {Fwd_GETS, Fwd_GET_INSTR}, SINK_WB_ACK) {
     dt_sendDataToRequestor_fromTBE;
     d2t_sendDataToL2_fromTBE;
+    l_popRequestQueue;
+  }
+
+  transition(M_I, Fwd_EXPOSE, SINK_WB_ACK) {
+    dtex_sendDataToExposeRequestor_fromTBE;
+    d2tex_sendExposeDataToL2_fromTBE;
+    l_popRequestQueue;
+  }
+
+  transition(M_I, Fwd_GETSPEC) {
+    dts_sendDataToSpecRequestor_fromTBE;
     l_popRequestQueue;
   }
 
@@ -1314,6 +1542,14 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
     kd_wakeUpDependents;
   }
 
+  // [InvisiSpec] Data and Data_Exclusive are not possible at IX
+  transition(IX, {Data_all_Acks, DataS_fromL1}, I) {
+    hsx_spec_load_hit;
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+    kd_wakeUpDependents;
+  }
+
   // Transitions from IM
   transition(IM, Inv, IM) {
     fi_sendInvAck;
@@ -1357,7 +1593,7 @@ machine(MachineType:L1Cache, "MESI Directory L1 Cache CMP")
 
   // transitions from SM
   transition(SM, Inv, IM) {
-    forward_eviction_to_cpu;
+    forward_external_eviction_to_cpu;
     fi_sendInvAck;
     dg_invalidate_sc;
     l_popRequestQueue;

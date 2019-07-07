@@ -166,6 +166,7 @@ class StaticInst : public RefCounted, public StaticInstFlags
     bool isSerializing()  const { return flags[IsSerializing] ||
                                       flags[IsSerializeBefore] ||
                                       flags[IsSerializeAfter]; }
+    bool isBlock()       const { return flags[IsBlock]; } // add attribute for blocking issue stage [mengjia]
     bool isSerializeBefore() const { return flags[IsSerializeBefore]; }
     bool isSerializeAfter() const { return flags[IsSerializeAfter]; }
     bool isSquashAfter() const { return flags[IsSquashAfter]; }

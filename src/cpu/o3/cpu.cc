@@ -593,6 +593,7 @@ FullO3CPU<Impl>::tick()
 
     activityRec.advance();
 
+    DPRINTF(O3CPU, "activityRec.advance() complete\n");
     if (removeInstsThisCycle) {
         cleanUpRemovedInsts();
     }
@@ -610,6 +611,8 @@ FullO3CPU<Impl>::tick()
             schedule(tickEvent, clockEdge(Cycles(1)));
             DPRINTF(O3CPU, "Scheduling next tick!\n");
         }
+    } else {
+        DPRINTF(O3CPU, "tickEvent.scheduled == false, %lu", curTick());
     }
 
     if (!FullSystem)

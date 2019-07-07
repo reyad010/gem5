@@ -175,6 +175,11 @@ enumeration(RubyRequestType, desc="...", default="RubyRequestType_NULL") {
   Release,           desc="Release operation";
   Acquire,           desc="Acquire opertion";
   AcquireRelease,    desc="Acquire and Release opertion";
+  // [InvisiSpec] New request types
+  SPEC_LD,           desc="Speculative load";
+  EXPOSE,            desc="Expose";
+  VALIDATE,          desc="Validate";
+  SPEC_FLUSH,        desc="Flush SpecBuffer";
 }
 
 enumeration(SequencerRequestType, desc="...", default="SequencerRequestType_NULL") {
@@ -255,6 +260,12 @@ enumeration(MessageSizeType, desc="...") {
   Unblock_Control, desc="Unblock control";
   Persistent_Control, desc="Persistent request activation messages";
   Completion_Control, desc="Completion messages";
+  SPECLD_Control, desc="SPECLD control message";
+  SPECLD_Request_Control, desc="SPECLD forward message";
+  SPECLD_Data, desc="SPECLD data response";
+  EXPOSE_Control, desc="EXPOSE control message";
+  EXPOSE_Request_Control, desc="EXPOSE forward request";
+  EXPOSE_Data, desc="EXPOSE data response";
 }
 
 // AccessType
@@ -344,6 +355,7 @@ enumeration(RequestStatus, desc="...", default="RequestStatus_NULL")  {
   Issued, desc="The sequencer successfully issued the request";
   BufferFull, desc="Can not issue because the sequencer is full";
   Aliased, desc="This request aliased with a currently outstanding request";
+  Merged, desc="This request merged with a currently outstanding request";
   NULL, desc="";
 }
 

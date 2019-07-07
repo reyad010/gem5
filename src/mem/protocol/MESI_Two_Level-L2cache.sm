@@ -72,6 +72,8 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     ISS, AccessPermission:Busy, desc="L2 idle, got single L1_GETS, issued memory fetch, have not seen response yet";
     IS, AccessPermission:Busy, desc="L2 idle, got L1_GET_INSTR or multiple L1_GETS, issued memory fetch, have not seen response yet";
     IM, AccessPermission:Busy, desc="L2 idle, got L1_GETX, issued memory fetch, have not seen response(s) yet";
+    II, AccessPermission:Busy, desc="L2 idle, got single L1_GETSPEC, issued memory fetch, have not seen response yet";
+    IEE, AccessPermission:Busy, desc="L2 idle, got single L1_EXPOSE, issued memory fetch, have not seen response yet";
 
     // Blocking states
     SS_MB, AccessPermission:Busy, desc="Blocked for L1_GETX from SS";
@@ -95,6 +97,9 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
 
     L1_PUTX,                 desc="L1 replacing data";
     L1_PUTX_old,             desc="L1 replacing data, but no longer sharer";
+
+    L1_GETSPEC,              desc="L1 GETSPEC request for a block mapped to us";
+    L1_EXPOSE,               desc="L1 EXPOSE request for a block mapped to us";
 
     // events initiated by this L2
     L2_Replacement,     desc="L2 Replacement", format="!r";
@@ -135,6 +140,8 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     bool Dirty, default="false", desc="Data is Dirty";
 
     NetDest L1_GetS_IDs,            desc="Set of the internal processors that want the block in shared state";
+    NetDest L1_GetSPEC_IDs,            desc="Set of the internal processors that want the block speculatively";
+    NetDest L1_Expose_IDs,            desc="Set of the internal processors that want the block to be exposed";
     MachineID L1_GetX_ID,          desc="ID of the L1 cache to forward the block to once we get a response";
     int pendingAcks,            desc="number of pending acks for invalidates during writeback";
   }
@@ -267,6 +274,10 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
       } else {
         return Event:L1_PUTX_old;
       }
+    } else if (type == CoherenceRequestType:GETSPEC) {
+      return Event:L1_GETSPEC;
+    } else if (type == CoherenceRequestType:EXPOSE) {
+      return Event:L1_EXPOSE;
     } else {
       DPRINTF(RubySlicc, "address: %#x, Request Type: %s\n", addr, type);
       error("Invalid L1 forwarded request type");
@@ -399,10 +410,12 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     peek(L1RequestL2Network_in, RequestMsg) {
       enqueue(DirRequestL2Network_out, RequestMsg, l2_request_latency) {
         out_msg.addr := address;
-        out_msg.Type := CoherenceRequestType:GETS;
+        out_msg.Type := in_msg.Type;
         out_msg.Requestor := machineID;
         out_msg.Destination.add(mapAddressToMachine(address, MachineType:Directory));
-        out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.MessageSize := in_msg.MessageSize;
+        out_msg.idx := in_msg.idx;
+        out_msg.origin := in_msg.Requestor;
       }
     }
   }
@@ -416,6 +429,32 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
         out_msg.Requestor := in_msg.Requestor;
         out_msg.Destination.add(cache_entry.Exclusive);
         out_msg.MessageSize := MessageSizeType:Request_Control;
+      }
+    }
+  }
+
+  action(bs_forwardSpecRequestToExclusive, "bs", desc="Forward request to the exclusive L1") {
+    peek(L1RequestL2Network_in, RequestMsg) {
+      enqueue(L1RequestL2Network_out, RequestMsg, to_l1_latency) {
+        assert(is_valid(cache_entry));
+        out_msg.addr := address;
+        out_msg.Type := in_msg.Type;
+        out_msg.Requestor := in_msg.Requestor;
+        out_msg.Destination.add(cache_entry.Exclusive);
+        out_msg.MessageSize := MessageSizeType:SPECLD_Request_Control;
+      }
+    }
+  }
+
+  action(bex_forwardExposeRequestToExclusive, "bex", desc="Forward request to the exclusive L1") {
+    peek(L1RequestL2Network_in, RequestMsg) {
+      enqueue(L1RequestL2Network_out, RequestMsg, to_l1_latency) {
+        assert(is_valid(cache_entry));
+        out_msg.addr := address;
+        out_msg.Type := in_msg.Type;
+        out_msg.Requestor := in_msg.Requestor;
+        out_msg.Destination.add(cache_entry.Exclusive);
+        out_msg.MessageSize := MessageSizeType:EXPOSE_Request_Control;
       }
     }
   }
@@ -494,6 +533,25 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     }
   }
 
+  action(ddex_sendExclusiveDataToExposeRequestor, "ddex", desc="Send data from cache to reqeustor") {
+    peek(L1RequestL2Network_in, RequestMsg) {
+      enqueue(responseL2Network_out, ResponseMsg, l2_response_latency) {
+        assert(is_valid(cache_entry));
+        out_msg.addr := address;
+        out_msg.Type := CoherenceResponseType:DATA_EXCLUSIVE;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.DataBlk := cache_entry.DataBlk;
+        out_msg.MessageSize := MessageSizeType:EXPOSE_Data;
+
+        out_msg.AckCount := 0 - cache_entry.Sharers.count();
+        if (cache_entry.Sharers.isElement(in_msg.Requestor)) {
+          out_msg.AckCount := out_msg.AckCount + 1;
+        }
+      }
+    }
+  }
+
   action(ds_sendSharedDataToRequestor, "ds", desc="Send data from cache to reqeustor") {
     peek(L1RequestL2Network_in, RequestMsg) {
       enqueue(responseL2Network_out, ResponseMsg, l2_response_latency) {
@@ -509,9 +567,39 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     }
   }
 
+  action(dss_sendSharedDataToSpecRequestor, "dss", desc="Send data from cache to reqeustor") {
+    peek(L1RequestL2Network_in, RequestMsg) {
+      enqueue(responseL2Network_out, ResponseMsg, l2_response_latency) {
+        assert(is_valid(cache_entry));
+        out_msg.addr := address;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.DataBlk := cache_entry.DataBlk;
+        out_msg.MessageSize := MessageSizeType:SPECLD_Data;
+        out_msg.AckCount := 0;
+      }
+    }
+  }
+
+  action(dsex_sendSharedDataToExposeRequestor, "dsex", desc="Send data from cache to reqeustor") {
+    peek(L1RequestL2Network_in, RequestMsg) {
+      enqueue(responseL2Network_out, ResponseMsg, l2_response_latency) {
+        assert(is_valid(cache_entry));
+        out_msg.addr := address;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.Sender := machineID;
+        out_msg.Destination.add(in_msg.Requestor);
+        out_msg.DataBlk := cache_entry.DataBlk;
+        out_msg.MessageSize := MessageSizeType:EXPOSE_Data;
+        out_msg.AckCount := 0;
+      }
+    }
+  }
+
   action(e_sendDataToGetSRequestors, "e", desc="Send data from cache to all GetS IDs") {
     assert(is_valid(tbe));
-    assert(tbe.L1_GetS_IDs.count() > 0);
+    assert(tbe.L1_GetS_IDs.count() + tbe.L1_GetSPEC_IDs.count() + tbe.L1_Expose_IDs.count() > 0);
     enqueue(responseL2Network_out, ResponseMsg, to_l1_latency) {
       assert(is_valid(cache_entry));
       out_msg.addr := address;
@@ -523,9 +611,40 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     }
   }
 
+  action(es_sendDataToGetSpecRequestors, "es", desc="Send data from cache to all GetSpec IDs") {
+    assert(is_valid(tbe));
+    assert(tbe.L1_GetS_IDs.count() + tbe.L1_GetSPEC_IDs.count() + tbe.L1_Expose_IDs.count() > 0);
+    peek(responseL2Network_in, ResponseMsg) {
+      enqueue(responseL2Network_out, ResponseMsg, to_l1_latency) {
+        out_msg.addr := address;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.Sender := machineID;
+        out_msg.Destination := tbe.L1_GetSPEC_IDs;  // internal nodes
+        out_msg.DataBlk := in_msg.DataBlk;
+        out_msg.MessageSize := MessageSizeType:SPECLD_Data;
+      }
+    }
+  }
+
+  action(eex_sendDataToExposeRequestors, "eex", desc="Send data from cache to all GetSpec IDs") {
+    assert(is_valid(tbe));
+    assert(tbe.L1_GetS_IDs.count() + tbe.L1_GetSPEC_IDs.count() + tbe.L1_Expose_IDs.count() > 0);
+    peek(responseL2Network_in, ResponseMsg) {
+      enqueue(responseL2Network_out, ResponseMsg, to_l1_latency) {
+        out_msg.addr := address;
+        out_msg.Type := CoherenceResponseType:DATA;
+        out_msg.Sender := machineID;
+        out_msg.Destination := tbe.L1_Expose_IDs;  // internal nodes
+        out_msg.DataBlk := in_msg.DataBlk;
+        out_msg.MessageSize := MessageSizeType:EXPOSE_Data;
+      }
+    }
+  }
+
   action(ex_sendExclusiveDataToGetSRequestors, "ex", desc="Send data from cache to all GetS IDs") {
     assert(is_valid(tbe));
     assert(tbe.L1_GetS_IDs.count() == 1);
+    assert(tbe.L1_GetSPEC_IDs.count() + tbe.L1_Expose_IDs.count() == 0);
     enqueue(responseL2Network_out, ResponseMsg, to_l1_latency) {
       assert(is_valid(cache_entry));
       out_msg.addr := address;
@@ -534,6 +653,21 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
       out_msg.Destination := tbe.L1_GetS_IDs;  // internal nodes
       out_msg.DataBlk := cache_entry.DataBlk;
       out_msg.MessageSize := MessageSizeType:Response_Data;
+    }
+  }
+
+  action(exex_sendExclusiveDataToExposeRequestors, "exex", desc="Send data from cache to all GetS IDs") {
+    assert(is_valid(tbe));
+    assert(tbe.L1_Expose_IDs.count() == 1);
+    assert(tbe.L1_GetS_IDs.count() + tbe.L1_GetSPEC_IDs.count() == 0);
+    enqueue(responseL2Network_out, ResponseMsg, to_l1_latency) {
+      assert(is_valid(cache_entry));
+      out_msg.addr := address;
+      out_msg.Type := CoherenceResponseType:DATA_EXCLUSIVE;
+      out_msg.Sender := machineID;
+      out_msg.Destination := tbe.L1_Expose_IDs;  // internal nodes
+      out_msg.DataBlk := cache_entry.DataBlk;
+      out_msg.MessageSize := MessageSizeType:EXPOSE_Data;
     }
   }
 
@@ -598,9 +732,21 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     TBEs.allocate(address);
     set_tbe(TBEs[address]);
     tbe.L1_GetS_IDs.clear();
+    tbe.L1_GetSPEC_IDs.clear();
+    tbe.L1_Expose_IDs.clear();
     tbe.DataBlk := cache_entry.DataBlk;
     tbe.Dirty := cache_entry.Dirty;
     tbe.pendingAcks := cache_entry.Sharers.count();
+  }
+
+  action(iw_allocateTBEWithoutCacheEntry, "iw", desc="Allocate TBE for request without a cache entry") {
+    check_allocate(TBEs);
+    assert(!is_valid(cache_entry));
+    TBEs.allocate(address);
+    set_tbe(TBEs[address]);
+    tbe.L1_GetS_IDs.clear();
+    tbe.L1_GetSPEC_IDs.clear();
+    tbe.L1_Expose_IDs.clear();
   }
 
   action(s_deallocateTBE, "s", desc="Deallocate external TBE") {
@@ -665,6 +811,20 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     peek(L1RequestL2Network_in, RequestMsg) {
       assert(is_valid(tbe));
       tbe.L1_GetS_IDs.add(in_msg.Requestor);
+    }
+  }
+
+  action(sss_recordGetSPECL1ID, "\sss", desc="Record L1 GetSpec for load response") {
+    peek(L1RequestL2Network_in, RequestMsg) {
+      assert(is_valid(tbe));
+      tbe.L1_GetSPEC_IDs.add(in_msg.Requestor);
+    }
+  }
+
+  action(ssss_recordExposeL1ID, "\ssss", desc="Record L1 Expose for load response") {
+    peek(L1RequestL2Network_in, RequestMsg) {
+      assert(is_valid(tbe));
+      tbe.L1_Expose_IDs.add(in_msg.Requestor);
     }
   }
 
@@ -793,21 +953,22 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   // BASE STATE - I
 
   // Transitions from I (Idle)
-  transition({NP, IS, ISS, IM, SS, M, M_I, I_I, S_I, MT_IB, MT_SB}, L1_PUTX) {
+  transition({NP, IS, ISS, IEE, IM, II, SS, M, M_I, I_I, S_I, MT_IB, MT_SB}, L1_PUTX) {
     t_sendWBAck;
     jj_popL1RequestQueue;
   }
 
-  transition({NP, SS, M, MT, M_I, I_I, S_I, IS, ISS, IM, MT_IB, MT_SB}, L1_PUTX_old) {
+  transition({NP, SS, M, MT, M_I, I_I, S_I, IS, ISS, IEE, IM, II, MT_IB, MT_SB}, L1_PUTX_old) {
     t_sendWBAck;
     jj_popL1RequestQueue;
   }
 
-  transition({IM, IS, ISS, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB}, {L2_Replacement, L2_Replacement_clean}) {
+  transition({IM, IS, ISS, IEE, II, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB}, {L2_Replacement, L2_Replacement_clean}) {
     zz_stallAndWaitL1RequestQueue;
   }
 
-  transition({IM, IS, ISS, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB}, MEM_Inv) {
+  // [InvisiSpec] TODO: How to handle Mem_Inv at II? Stall or ignore?
+  transition({IM, IS, ISS, IEE, II, SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB}, MEM_Inv) {
     zn_recycleResponseNetwork;
   }
 
@@ -816,7 +977,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   }
 
 
-  transition({SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB}, {L1_GETS, L1_GET_INSTR, L1_GETX, L1_UPGRADE}) {
+  transition({SS_MB, MT_MB, MT_IIB, MT_IB, MT_SB}, {L1_GETS, L1_EXPOSE, L1_GET_INSTR, L1_GETX, L1_UPGRADE, L1_GETSPEC}) {
     zz_stallAndWaitL1RequestQueue;
   }
 
@@ -827,6 +988,17 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     nn_addSharer;
     i_allocateTBE;
     ss_recordGetSL1ID;
+    a_issueFetchToMemory;
+    uu_profileMiss;
+    jj_popL1RequestQueue;
+  }
+
+  transition(NP, L1_EXPOSE,  IEE) {
+    qq_allocateL2CacheBlock;
+    ll_clearSharers;
+    nn_addSharer;
+    i_allocateTBE;
+    ssss_recordExposeL1ID;
     a_issueFetchToMemory;
     uu_profileMiss;
     jj_popL1RequestQueue;
@@ -854,12 +1026,28 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     jj_popL1RequestQueue;
   }
 
+  transition(NP, L1_GETSPEC, II) {
+    iw_allocateTBEWithoutCacheEntry;
+    sss_recordGetSPECL1ID;
+    a_issueFetchToMemory;
+    jj_popL1RequestQueue;
+  }
+
 
   // transitions from IS/IM
 
   transition(ISS, Mem_Data, MT_MB) {
     m_writeDataToCache;
     ex_sendExclusiveDataToGetSRequestors;
+    es_sendDataToGetSpecRequestors;
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+  }
+
+  transition(IEE, Mem_Data, MT_MB) {
+    m_writeDataToCache;
+    exex_sendExclusiveDataToExposeRequestors;
+    es_sendDataToGetSpecRequestors;
     s_deallocateTBE;
     o_popIncomingResponseQueue;
   }
@@ -867,6 +1055,8 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   transition(IS, Mem_Data, SS) {
     m_writeDataToCache;
     e_sendDataToGetSRequestors;
+    es_sendDataToGetSpecRequestors;
+    eex_sendDataToExposeRequestors;
     s_deallocateTBE;
     o_popIncomingResponseQueue;
     kd_wakeUpDependents;
@@ -879,18 +1069,48 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     o_popIncomingResponseQueue;
   }
 
-  transition({IS, ISS}, {L1_GETS, L1_GET_INSTR}, IS) {
+  transition(II, Mem_Data, NP) {
+    es_sendDataToGetSpecRequestors;
+    s_deallocateTBE;
+    o_popIncomingResponseQueue;
+    kd_wakeUpDependents;
+  }
+
+  transition({IS, ISS, IEE}, {L1_GETS, L1_GET_INSTR}, IS) {
     nn_addSharer;
     ss_recordGetSL1ID;
     uu_profileMiss;
     jj_popL1RequestQueue;
   }
 
-  transition({IS, ISS}, L1_GETX) {
+  transition({IS, ISS, IEE}, L1_EXPOSE, IS) {
+    nn_addSharer;
+    ssss_recordExposeL1ID;
+    uu_profileMiss;
+    jj_popL1RequestQueue;
+  }
+
+  transition({IS, ISS, IEE}, L1_GETSPEC, IS) {
+    sss_recordGetSPECL1ID;
+    jj_popL1RequestQueue;
+  }
+
+  transition(II, L1_GETSPEC) {
+    sss_recordGetSPECL1ID;
+    jj_popL1RequestQueue;
+  }
+
+  // [InvisiSpec] L1_GET_INSTR should not be received at II
+  transition(II, {L1_GETS, L1_EXPOSE}) {
     zz_stallAndWaitL1RequestQueue;
   }
 
-  transition(IM, {L1_GETX, L1_GETS, L1_GET_INSTR}) {
+  // [InvisiSpec] TODO: Maybe we can optimize this?
+  transition({IS, ISS, IEE, II}, L1_GETX) {
+    zz_stallAndWaitL1RequestQueue;
+  }
+
+  transition(IM, {L1_GETX, L1_GETS, L1_EXPOSE, L1_GET_INSTR, L1_GETSPEC}) {
     zz_stallAndWaitL1RequestQueue;
   }
 
@@ -900,6 +1120,19 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     nn_addSharer;
     set_setMRU;
     uu_profileHit;
+    jj_popL1RequestQueue;
+  }
+
+  transition(SS, L1_EXPOSE) {
+    dsex_sendSharedDataToExposeRequestor;
+    nn_addSharer;
+    set_setMRU;
+    uu_profileHit;
+    jj_popL1RequestQueue;
+  }
+
+  transition({SS, M}, L1_GETSPEC) {
+    dss_sendSharedDataToSpecRequestor;
     jj_popL1RequestQueue;
   }
 
@@ -956,6 +1189,14 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     jj_popL1RequestQueue;
   }
 
+  // [InvisiSpec] TODO
+  transition(M, L1_EXPOSE, MT_MB) {
+    ddex_sendExclusiveDataToExposeRequestor;
+    set_setMRU;
+    uu_profileHit;
+    jj_popL1RequestQueue;
+  }
+
   transition(M, {L2_Replacement, MEM_Inv}, M_I) {
     i_allocateTBE;
     c_exclusiveReplacement;
@@ -983,6 +1224,20 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
     b_forwardRequestToExclusive;
     uu_profileMiss;
     set_setMRU;
+    jj_popL1RequestQueue;
+  }
+
+  // [InvisiSpec] TODO: Ack packets are currently not recorded as EXPOSE traffic.
+  transition(MT, L1_EXPOSE, MT_IIB) {
+    bex_forwardExposeRequestToExclusive;
+    uu_profileMiss;
+    set_setMRU;
+    jj_popL1RequestQueue;
+  }
+
+  // [InvisiSpec] Do we need to block?
+  transition(MT, L1_GETSPEC) {
+    bs_forwardSpecRequestToExclusive;
     jj_popL1RequestQueue;
   }
 
@@ -1039,7 +1294,7 @@ machine(MachineType:L2Cache, "MESI Directory L2 Cache CMP")
   }
 
   // writeback states
-  transition({I_I, S_I, MT_I, MCT_I, M_I}, {L1_GETX, L1_UPGRADE, L1_GETS, L1_GET_INSTR}) {
+  transition({I_I, S_I, MT_I, MCT_I, M_I}, {L1_GETX, L1_UPGRADE, L1_GETS, L1_EXPOSE, L1_GET_INSTR, L1_GETSPEC}) {
     zz_stallAndWaitL1RequestQueue;
   }
 

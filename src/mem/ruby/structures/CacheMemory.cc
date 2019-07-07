@@ -176,7 +176,9 @@ CacheMemory::tryCacheAccess(Addr address, RubyRequestType type,
             return true;
         }
         if ((entry->m_Permission == AccessPermission_Read_Only) &&
-            (type == RubyRequestType_LD || type == RubyRequestType_IFETCH)) {
+            (type == RubyRequestType_LD ||
+             type == RubyRequestType_IFETCH ||
+             type == RubyRequestType_SPEC_LD)) {
             return true;
         }
         // The line must not be accessible

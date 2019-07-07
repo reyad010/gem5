@@ -149,6 +149,9 @@ class Request
         MEM_SWAP                    = 0x00400000,
         MEM_SWAP_COND               = 0x00800000,
 
+        /** [InvisiSpec] it is a spec request */
+        SPEC                        = 0x00004000,
+
         /** The request is a prefetch. */
         PREFETCH                    = 0x01000000,
         /** The request should be prefetched into the exclusive state. */
@@ -784,6 +787,7 @@ class Request
     bool isStrictlyOrdered() const { return _flags.isSet(STRICT_ORDER); }
     bool isInstFetch() const { return _flags.isSet(INST_FETCH); }
     bool isPrefetch() const { return _flags.isSet(PREFETCH); }
+    bool isSpec() const { return _flags.isSet(SPEC); }
     bool isLLSC() const { return _flags.isSet(LLSC); }
     bool isPriv() const { return _flags.isSet(PRIVILEGED); }
     bool isLockedRMW() const { return _flags.isSet(LOCKED_RMW); }

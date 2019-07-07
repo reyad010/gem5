@@ -84,6 +84,7 @@ class StaticInstFlags(Enum):
 
         'IsSerializing',    # Serializes pipeline: won't execute until all
                             # older instructions have committed.
+        'IsBlock',          # Block issuing. [mengjia]
         'IsSerializeBefore',
         'IsSerializeAfter',
         'IsMemBarrier',     # Is a memory barrier

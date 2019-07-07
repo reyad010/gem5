@@ -133,6 +133,15 @@ class MemCmd
         FlushReq,      //request for a cache flush
         InvalidateReq,   // request for address to be invalidated
         InvalidateResp,
+        /* [InvisiSpec] New commands */
+        ReadSpecReq,
+        ReadSpecResp,
+        ValidateReq,
+        ValidateResp,
+        ExposeReq,
+        ExposeResp,
+        SpecFlushReq,
+        SpecFlushResp,
         NUM_MEM_CMDS
     };
 
@@ -160,6 +169,11 @@ class MemCmd
         IsPrint,        //!< Print state matching address (for debugging)
         IsFlush,        //!< Flush the address from caches
         FromCache,      //!< Request originated from a caching agent
+        /* [InvisiSpec] New attributes */
+        IsSpec,         //!< Speculatively issued
+        IsValidate,
+        IsExpose,
+        IsSpecFlush,
         NUM_COMMAND_ATTRIBUTES
     };
 
@@ -225,6 +239,12 @@ class MemCmd
     bool isError() const        { return testCmdAttrib(IsError); }
     bool isPrint() const        { return testCmdAttrib(IsPrint); }
     bool isFlush() const        { return testCmdAttrib(IsFlush); }
+
+    /// [InvisiSpec] InvisiSpec attributes
+    bool isSpec() const         { return testCmdAttrib(IsSpec); }
+    bool isValidate() const     { return testCmdAttrib(IsValidate); }
+    bool isExpose() const       { return testCmdAttrib(IsExpose); }
+    bool isSpecFlush() const    { return testCmdAttrib(IsSpecFlush); }
 
     Command
     responseCommand() const
@@ -306,7 +326,17 @@ class Packet : public Printable
 
         // Signal block present to squash prefetch and cache evict packets
         // through express snoop flag
-        BLOCK_CACHED          = 0x00010000
+        BLOCK_CACHED          = 0x00010000,
+
+        // [InvisiSpec] ReadSpecReq was L1 hit.
+        L1_HIT                = 0x00020000,
+
+        // [InvisiSpec] this packet is the first one of split packets
+        // maximum split is 2
+        FIRST_IN_SPLIT      = 0x00040000,
+        ONLY_ACCESS_SPEC_BUFF      = 0x00080000,
+
+        EXTERNAL_EVICTION = 0x00100000,
     };
 
     Flags flags;
@@ -375,6 +405,12 @@ class Packet : public Printable
      * relative, a 32-bit unsigned should be sufficient.
      */
     uint32_t payloadDelay;
+
+    //[InvisiSpec] indicate the source buffer entry
+    //if the load should get data from specbuffer
+    int srcIdx;
+    int reqIdx;
+    bool isSplit;
 
     /**
      * A virtual base opaque structure used to hold state associated
@@ -548,6 +584,45 @@ class Packet : public Printable
     bool isError() const             { return cmd.isError(); }
     bool isPrint() const             { return cmd.isPrint(); }
     bool isFlush() const             { return cmd.isFlush(); }
+
+    /// [InvisiSpec] InvisiSpec flags
+    bool isSpec() const              { return cmd.isSpec(); }
+    bool isValidate() const          { return cmd.isValidate(); }
+    bool isExpose() const            { return cmd.isExpose(); }
+    bool isSpecFlush() const         { return cmd.isSpecFlush(); }
+    bool isL1Hit() const             { return flags.isSet(L1_HIT); }
+    bool isExternalEviction() const  { return flags.isSet(EXTERNAL_EVICTION); }
+    // [InvisiSpec] Check whether it is the first in split packets
+    bool isFirst() const             { return flags.isSet(FIRST_IN_SPLIT); }
+    bool onlyAccessSpecBuff() const
+        { return flags.isSet(ONLY_ACCESS_SPEC_BUFF); }
+
+    void setL1Hit()
+    {
+        assert(isSpec());
+        assert(!flags.isSet(L1_HIT));
+        flags.set(L1_HIT);
+    }
+
+    void setExternalEviction()
+    {
+        assert(!flags.isSet(EXTERNAL_EVICTION));
+        flags.set(EXTERNAL_EVICTION);
+    }
+
+    void setOnlyAccessSpecBuff()
+    {
+        assert(isSpec());
+        assert(!flags.isSet(ONLY_ACCESS_SPEC_BUFF));
+        flags.set(ONLY_ACCESS_SPEC_BUFF);
+    }
+
+    void setFirst()
+    {
+        //assert(isSpec());
+        assert(!flags.isSet(FIRST_IN_SPLIT));
+        flags.set(FIRST_IN_SPLIT);
+    }
 
     //@{
     /// Snoop flags
@@ -748,7 +823,8 @@ class Packet : public Printable
     Packet(const RequestPtr _req, MemCmd _cmd)
         :  cmd(_cmd), id((PacketId)_req), req(_req), data(nullptr), addr(0),
            _isSecure(false), size(0), headerDelay(0), snoopDelay(0),
-           payloadDelay(0), senderState(NULL)
+           payloadDelay(0), srcIdx(-1), reqIdx(-1), isSplit(false),
+           senderState(NULL)
     {
         if (req->hasPaddr()) {
             addr = req->getPaddr();
@@ -769,7 +845,8 @@ class Packet : public Printable
     Packet(const RequestPtr _req, MemCmd _cmd, int _blkSize, PacketId _id = 0)
         :  cmd(_cmd), id(_id ? _id : (PacketId)_req), req(_req), data(nullptr),
            addr(0), _isSecure(false), headerDelay(0), snoopDelay(0),
-           payloadDelay(0), senderState(NULL)
+           payloadDelay(0), srcIdx(-1), reqIdx(-1), isSplit(false),
+           senderState(NULL)
     {
         if (req->hasPaddr()) {
             addr = req->getPaddr() & ~(_blkSize - 1);
@@ -795,6 +872,9 @@ class Packet : public Printable
            headerDelay(pkt->headerDelay),
            snoopDelay(0),
            payloadDelay(pkt->payloadDelay),
+           srcIdx(pkt->srcIdx),
+           reqIdx(pkt->reqIdx),
+           isSplit(pkt->isSplit),
            senderState(pkt->senderState)
     {
         if (!clear_flags)
@@ -866,6 +946,33 @@ class Packet : public Printable
     createWrite(const RequestPtr req)
     {
         return new Packet(req, makeWriteCmd(req));
+    }
+
+    /**
+     * [InvisiSpec] Methods that return Packets for InvisiSpec.
+     */
+    static PacketPtr
+    createReadSpec(const RequestPtr req)
+    {
+        return new Packet(req, MemCmd::ReadSpecReq);
+    }
+
+    static PacketPtr
+    createValidate(const RequestPtr req)
+    {
+        return new Packet(req, MemCmd::ValidateReq);
+    }
+
+    static PacketPtr
+    createExpose(const RequestPtr req)
+    {
+        return new Packet(req, MemCmd::ExposeReq);
+    }
+
+    static PacketPtr
+    createSpecFlush(const RequestPtr req)
+    {
+        return new Packet(req, MemCmd::SpecFlushReq);
     }
 
     /**

@@ -66,6 +66,10 @@ class DerivO3CPU(BaseCPU):
 
     cacheStorePorts = Param.Unsigned(200, "Cache Ports. "
           "Constrains stores only. Loads are constrained by load FUs.")
+    # we deal with validation very similar as store writes back
+    # FIXME: not sure whether it is the correct parameter or not
+    cacheValidationPorts = Param.Unsigned(200, "Validation Ports. "
+          "Constrains validations only. Loads are constrained by load FUs.")
 
     decodeToFetchDelay = Param.Cycles(1, "Decode to fetch delay")
     renameToFetchDelay = Param.Cycles(1 ,"Rename to fetch delay")
@@ -122,7 +126,7 @@ class DerivO3CPU(BaseCPU):
     LFSTSize = Param.Unsigned(1024, "Last fetched store table size")
     SSITSize = Param.Unsigned(1024, "Store set ID table size")
 
-    numRobs = Param.Unsigned(1, "Number of Reorder Buffers");
+    numRobs = Param.Unsigned(1, "Number of Reorder Buffers")
 
     numPhysIntRegs = Param.Unsigned(256, "Number of physical integer registers")
     numPhysFloatRegs = Param.Unsigned(256, "Number of physical floating point "
@@ -155,10 +159,14 @@ class DerivO3CPU(BaseCPU):
     smtCommitPolicy = Param.String('RoundRobin', "SMT Commit Policy")
 
     branchPred = Param.BranchPredictor(TournamentBP(numThreads =
-                                                       Parent.numThreads),
+                                       Parent.numThreads),
                                        "Branch Predictor")
-    needsTSO = Param.Bool(buildEnv['TARGET_ISA'] == 'x86',
-                          "Enable TSO Memory model")
+
+    # [mengjia] add configuration variables
+    simulateScheme = Param.String('UnsafeBaseline',
+                                   "The scheme specificed for simulation")
+    needsTSO = Param.Bool(False, "Enable TSO Memory model")
+    allowSpecBuffHit = Param.Bool(True, "Enable hit/reuse spec buffer entries")
 
     def addCheckerCpu(self):
         if buildEnv['TARGET_ISA'] in ['arm']:

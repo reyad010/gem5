@@ -36,6 +36,8 @@
 #include "debug/ProtocolTrace.hh"
 #include "debug/RubySequencer.hh"
 #include "debug/RubyStats.hh"
+#include "debug/SpecBuffer.hh"
+#include "debug/SpecBufferValidate.hh"
 #include "mem/packet.hh"
 #include "mem/protocol/PrefetchBit.hh"
 #include "mem/protocol/RubyAccessMode.hh"
@@ -54,7 +56,9 @@ RubySequencerParams::create()
 
 Sequencer::Sequencer(const Params *p)
     : RubyPort(p), m_IncompleteTimes(MachineType_NUM),
-      deadlockCheckEvent([this]{ wakeup(); }, "Sequencer deadlock check")
+      deadlockCheckEvent([this]{ wakeup(); }, "Sequencer deadlock check"),
+      m_specBuf(33),
+      specBufferHitEvent([this]{ specBufferHitCallback(); }, "Sequencer spec buffer hit")
 {
     m_outstanding_count = 0;
 
@@ -160,6 +164,7 @@ void Sequencer::resetStats()
     }
 }
 
+// [InvisiSpec] Request on the way from CPU to Ruby
 // Insert the request on the correct request table.  Return true if
 // the entry was already present.
 RequestStatus
@@ -190,6 +195,7 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType request_type)
     RequestTable::value_type default_entry(line_addr,
                                            (SequencerRequest*) NULL);
 
+    // [InvisiSpec] If store
     if ((request_type == RubyRequestType_ST) ||
         (request_type == RubyRequestType_RMW_Read) ||
         (request_type == RubyRequestType_RMW_Write) ||
@@ -217,6 +223,7 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType request_type)
           m_store_waiting_on_store++;
           return RequestStatus_Aliased;
         }
+    // [InvisiSpec] If load
     } else {
         // Check if there is any outstanding write request for the same
         // cache line.
@@ -232,6 +239,16 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType request_type)
             RequestTable::iterator i = r.first;
             i->second = new SequencerRequest(pkt, request_type, curCycle());
             m_outstanding_count++;
+        } else if (request_type == RubyRequestType_SPEC_LD) {
+            auto i = m_readRequestTable.find(line_addr);
+            if (i->second->m_type == RubyRequestType_SPEC_LD) {
+                DPRINTFR(SpecBuffer, "%10s Merging (idx=%d-%d, addr=%#x) with %d\n", curTick(), pkt->reqIdx, pkt->isFirst()? 0 : 1, printAddress(pkt->getAddr()), i->second->pkt->reqIdx);
+                i->second->dependentSpecRequests.push_back(pkt);
+                return RequestStatus_Merged;
+            } else {
+                m_load_waiting_on_load++;
+                return RequestStatus_Aliased;
+            }
         } else {
             // There is an outstanding read request for the cache line
             m_load_waiting_on_load++;
@@ -412,6 +429,19 @@ Sequencer::writeCallback(Addr address, DataBlock& data,
                 initialRequestTime, forwardRequestTime, firstResponseTime);
 }
 
+bool Sequencer::updateSBB(PacketPtr pkt, DataBlock& data, Addr dataAddress) {
+    uint8_t idx = pkt->reqIdx;
+    SBE& sbe = m_specBuf[idx];
+    int blkIdx = pkt->isFirst() ? 0 : 1;
+    SBB& sbb = sbe.blocks[blkIdx];
+    if (makeLineAddress(sbb.reqAddress) == dataAddress) {
+        sbb.data = data;
+        return true;
+    }
+    return false;
+}
+
+// [InvisiSpec] Called by Ruby to send a response to CPU.
 void
 Sequencer::readCallback(Addr address, DataBlock& data,
                         bool externalHit, const MachineType mach,
@@ -430,12 +460,78 @@ Sequencer::readCallback(Addr address, DataBlock& data,
     markRemoved();
 
     assert((request->m_type == RubyRequestType_LD) ||
+           (request->m_type == RubyRequestType_SPEC_LD) ||
+           (request->m_type == RubyRequestType_EXPOSE) ||
            (request->m_type == RubyRequestType_IFETCH));
+    
+    PacketPtr pkt = request->pkt;
+    if (pkt->isSpec()) {
+        assert(!pkt->onlyAccessSpecBuff());
+        DPRINTFR(SpecBuffer, "%10s SPEC_LD callback (idx=%d-%d, addr=%#x)\n", curTick(), pkt->reqIdx, pkt->isFirst()? 0 : 1, printAddress(pkt->getAddr()));
+        updateSBB(pkt, data, address);
+        if (!externalHit) {
+            pkt->setL1Hit();
+        }
+    } else if (pkt->isExpose()) {
+        DPRINTFR(SpecBuffer, "%10s EXPOSE callback (idx=%d-%d, addr=%#x)\n", curTick(), pkt->reqIdx, pkt->isFirst()? 0 : 1, printAddress(pkt->getAddr()));
+    } else if (pkt->isValidate()) {
+        DPRINTFR(SpecBuffer, "%10s VALIDATE callback (idx=%d-%d, addr=%#x)\n", curTick(), pkt->reqIdx, pkt->isFirst()? 0 : 1, printAddress(pkt->getAddr()));
+        uint8_t idx = pkt->reqIdx;
+        SBE& sbe = m_specBuf[idx];
+        int blkIdx = pkt->isFirst() ? 0 : 1;
+        SBB& sbb = sbe.blocks[blkIdx];
+        assert(makeLineAddress(sbb.reqAddress) == address);
+        if (!memcmp(sbb.data.getData(getOffset(pkt->getAddr()), pkt->getSize()), data.getData(getOffset(pkt->getAddr()), pkt->getSize()), pkt->getSize())) {
+            *(pkt->getPtr<uint8_t>()) = 1;
+        } else {
+            // std::ostringstream os;
+            // sbb.data.print(os);
+            // DPRINTFR(SpecBufferValidate, "%s\n", os.str());
+            // os.str("");
+            // data.print(os);
+            // DPRINTFR(SpecBufferValidate, "%s\n", os.str());
+            *(pkt->getPtr<uint8_t>()) = 0;
+        }
+    }
+
+    for (auto& dependentPkt : request->dependentSpecRequests) {
+        assert(!dependentPkt->onlyAccessSpecBuff());
+        DPRINTFR(SpecBuffer, "%10s Merged SPEC_LD callback (idx=%d-%d, addr=%#x)\n", curTick(), dependentPkt->reqIdx, dependentPkt->isFirst()? 0 : 1, printAddress(dependentPkt->getAddr()));
+        assert(dependentPkt->isSpec());
+        updateSBB(dependentPkt, data, address);
+        if (!externalHit) {
+            dependentPkt->setL1Hit();
+        }
+        memcpy(dependentPkt->getPtr<uint8_t>(),
+               data.getData(getOffset(dependentPkt->getAddr()), dependentPkt->getSize()),
+               dependentPkt->getSize());
+        ruby_hit_callback(dependentPkt);
+    }
 
     hitCallback(request, data, true, mach, externalHit,
                 initialRequestTime, forwardRequestTime, firstResponseTime);
 }
 
+void
+Sequencer::specBufferHitCallback()
+{
+    assert(m_specRequestQueue.size());
+    while (m_specRequestQueue.size()) {
+        auto specReq = m_specRequestQueue.front();
+        if (specReq.second <= curTick()) {
+            PacketPtr pkt = specReq.first;
+            assert(pkt->onlyAccessSpecBuff());
+            DPRINTFR(SpecBuffer, "%10s SB Hit Callback (idx=%d, addr=%#x)\n", curTick(), pkt->reqIdx, printAddress(pkt->getAddr()));
+            ruby_hit_callback(pkt);
+            m_specRequestQueue.pop();
+        } else {
+            schedule(specBufferHitEvent, specReq.second);
+            break;
+        }
+    }
+}
+
+// [InvisiSpec] Response on the way from Ruby to CPU
 void
 Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
                        bool llscSuccess,
@@ -470,8 +566,9 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
     if (RubySystem::getWarmupEnabled()) {
         data.setData(pkt->getConstPtr<uint8_t>(),
                      getOffset(request_address), pkt->getSize());
-    } else if (!pkt->isFlush()) {
+    } else if (!pkt->isFlush() && !pkt->isExpose() && !pkt->isValidate()) {
         if ((type == RubyRequestType_LD) ||
+            (type == RubyRequestType_SPEC_LD) ||
             (type == RubyRequestType_IFETCH) ||
             (type == RubyRequestType_RMW_Read) ||
             (type == RubyRequestType_Locked_RMW_Read) ||
@@ -534,6 +631,7 @@ Sequencer::empty() const
     return m_writeRequestTable.empty() && m_readRequestTable.empty();
 }
 
+// [InvisiSpec] Request on the way from CPU to Ruby
 RequestStatus
 Sequencer::makeRequest(PacketPtr pkt)
 {
@@ -544,7 +642,56 @@ Sequencer::makeRequest(PacketPtr pkt)
     RubyRequestType primary_type = RubyRequestType_NULL;
     RubyRequestType secondary_type = RubyRequestType_NULL;
 
-    if (pkt->isLLSC()) {
+    // [InvisiSpec] Handle new requests
+    if (pkt->isSpec()) {
+        assert(pkt->cmd == MemCmd::ReadSpecReq);
+        assert(pkt->isSplit || pkt->isFirst());
+        uint8_t idx = pkt->reqIdx;
+        SBE& sbe = m_specBuf[idx];
+        sbe.isSplit = pkt->isSplit;
+        int blkIdx = pkt->isFirst() ? 0 : 1;
+        SBB& sbb = sbe.blocks[blkIdx];
+        sbb.reqAddress = pkt->getAddr();
+        sbb.reqSize = pkt->getSize();
+        if (pkt->onlyAccessSpecBuff()) {
+            int srcIdx = pkt->srcIdx;
+            SBE& srcEntry = m_specBuf[srcIdx];
+            if (makeLineAddress(sbb.reqAddress) == makeLineAddress(srcEntry.blocks[0].reqAddress)) {
+                sbb.data = srcEntry.blocks[0].data;
+            } else if (makeLineAddress(sbb.reqAddress) == makeLineAddress(srcEntry.blocks[1].reqAddress)) {
+                sbb.data = srcEntry.blocks[1].data;
+            } else {
+                fatal("Requested address %#x is not present in the spec buffer\n", printAddress(sbb.reqAddress));
+            }
+            memcpy(pkt->getPtr<uint8_t>(),
+                   sbb.data.getData(getOffset(sbb.reqAddress), sbb.reqSize),
+                   sbb.reqSize);
+            m_specRequestQueue.push({pkt, curTick()});
+            DPRINTFR(SpecBuffer, "%10s SB Hit (idx=%d, addr=%#x) on (srcIdx=%d)\n", curTick(), idx, printAddress(sbb.reqAddress), srcIdx);
+            if (!specBufferHitEvent.scheduled()) {
+                schedule(specBufferHitEvent, clockEdge(Cycles(1)));
+            }
+            return RequestStatus_Issued;
+        } else {
+            // assert it is not in the buffer
+            primary_type = secondary_type = RubyRequestType_SPEC_LD;
+        }
+    } else if (pkt->isExpose() || pkt->isValidate()) {
+        assert(pkt->cmd == MemCmd::ExposeReq || pkt->cmd == MemCmd::ValidateReq);
+        assert(pkt->isSplit || pkt->isFirst());
+        uint8_t idx = pkt->reqIdx;
+        SBE& sbe = m_specBuf[idx];
+        sbe.isSplit = pkt->isSplit;
+        int blkIdx = pkt->isFirst() ? 0 : 1;
+        SBB& sbb = sbe.blocks[blkIdx];
+        if (sbb.reqAddress != pkt->getAddr()) {
+            fatal("sbb.reqAddress != pkt->getAddr: %#x != %#x\n", printAddress(sbb.reqAddress), printAddress(pkt->getAddr()));
+        }
+        if (sbb.reqSize != pkt->getSize()) {
+            fatal("sbb.reqSize != pkt->getSize(): %d != %d\n", sbb.reqSize, pkt->getSize());
+        }
+        primary_type = secondary_type = RubyRequestType_EXPOSE;
+    } else if (pkt->isLLSC()) {
         //
         // Alpha LL/SC instructions need to be handled carefully by the cache
         // coherence protocol to ensure they follow the proper semantics. In
@@ -615,8 +762,22 @@ Sequencer::makeRequest(PacketPtr pkt)
     }
 
     RequestStatus status = insertRequest(pkt, primary_type);
-    if (status != RequestStatus_Ready)
+    if (status == RequestStatus_Merged) {
+        return RequestStatus_Issued;
+    } else if (status != RequestStatus_Ready) {
         return status;
+    }
+
+    if (pkt->isSpec()) {
+        DPRINTFR(SpecBuffer, "%10s Issuing SPEC_LD (idx=%d-%d, addr=%#x)\n",
+                 curTick(), pkt->reqIdx, pkt->isFirst()? 0 : 1, printAddress(pkt->getAddr()));
+    } else if (pkt->isExpose()) {
+        DPRINTFR(SpecBuffer, "%10s Issuing EXPOSE (idx=%d-%d, addr=%#x)\n",
+                 curTick(), pkt->reqIdx, pkt->isFirst()? 0 : 1, printAddress(pkt->getAddr()));
+    } else if (pkt->isValidate()) {
+        DPRINTFR(SpecBuffer, "%10s Issuing VALIDATE (idx=%d-%d, addr=%#x)\n",
+                 curTick(), pkt->reqIdx, pkt->isFirst()? 0 : 1, printAddress(pkt->getAddr()));
+    }
 
     issueRequest(pkt, secondary_type);
 
@@ -643,7 +804,7 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
     // requests do not
     std::shared_ptr<RubyRequest> msg =
         std::make_shared<RubyRequest>(clockEdge(), pkt->getAddr(),
-                                      pkt->isFlush() ?
+                                      pkt->isFlush() || pkt->isExpose() ?
                                       nullptr : pkt->getPtr<uint8_t>(),
                                       pkt->getSize(), pc, secondary_type,
                                       RubyAccessMode_Supervisor, pkt,
@@ -717,9 +878,9 @@ Sequencer::recordRequestType(SequencerRequestType requestType) {
 
 
 void
-Sequencer::evictionCallback(Addr address)
+Sequencer::evictionCallback(Addr address, bool external)
 {
-    ruby_eviction_callback(address);
+    ruby_eviction_callback(address, external);
 }
 
 void

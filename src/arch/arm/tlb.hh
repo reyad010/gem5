@@ -169,6 +169,7 @@ class TLB : public BaseTLB
     mutable Stats::Scalar flushedEntries;
     mutable Stats::Scalar alignFaults;
     mutable Stats::Scalar prefetchFaults;
+    mutable Stats::Scalar specTLBMisses;
     mutable Stats::Scalar domainFaults;
     mutable Stats::Scalar permsFaults;
 

@@ -310,6 +310,44 @@ LSQ<Impl>::writebackStores()
     }
 }
 
+// [mengjia]
+template<class Impl>
+int 
+LSQ<Impl>::exposeLoads()
+{
+    list<ThreadID>::iterator threads = activeThreads->begin();
+    list<ThreadID>::iterator end = activeThreads->end();
+
+    int exposedLoads = 0;
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
+        if (numLoadsToVLD(tid) > 0) {
+            DPRINTF(Writeback,"[tid:%i] Validate loads. %i loads "
+                "available for Validate.\n", tid, numLoadsToVLD(tid));
+        }
+
+        exposedLoads += thread[tid].exposeLoads();
+    }
+    return exposedLoads;
+}
+
+
+// [mengjia]
+template<class Impl>
+void
+LSQ<Impl>::updateVisibleState()
+{
+    list<ThreadID>::iterator threads = activeThreads->begin();
+    list<ThreadID>::iterator end = activeThreads->end();
+
+    while (threads != end) {
+        ThreadID tid = *threads++;
+
+        thread[tid].updateVisibleState();
+    }
+}
+
 template<class Impl>
 bool
 LSQ<Impl>::violation()
@@ -339,6 +377,7 @@ LSQ<Impl>::recvReqRetry()
     }
 }
 
+// [InvisiSpec] Callback function for receiving a response
 template <class Impl>
 bool
 LSQ<Impl>::recvTimingResp(PacketPtr pkt)
@@ -346,6 +385,17 @@ LSQ<Impl>::recvTimingResp(PacketPtr pkt)
     if (pkt->isError())
         DPRINTF(LSQ, "Got error packet back for address: %#X\n",
                 pkt->getAddr());
+
+    // for expose or validate request,
+    // if the instruction is squashed, maybe the req has been deleted
+    if (pkt->isValidate() || pkt->isExpose()){
+        if (!pkt->req){
+            delete pkt;
+            return true;
+        }
+        DPRINTF(LSQ, "Receive an expose/validate response, idx=%d\n",
+                    pkt->reqIdx);
+    }
 
     thread[cpu->contextToThread(pkt->req->contextId())]
         .completeDataAccess(pkt);
@@ -370,7 +420,10 @@ LSQ<Impl>::recvTimingResp(PacketPtr pkt)
         }
     }
 
-    delete pkt->req;
+    //TODO: also not validation
+    if (!pkt->isExpose() && !pkt->isValidate()){
+        delete pkt->req;
+    }
     delete pkt;
     return true;
 }

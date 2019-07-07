@@ -143,6 +143,7 @@ DefaultCommit<Impl>::DefaultCommit(O3CPU *_cpu, DerivO3CPUParams *params)
         lastCommitedSeqNum[tid] = 0;
         squashAfterInst[tid] = NULL;
     }
+    lastCommitTick = curTick();
     interrupt = NoFault;
 }
 
@@ -182,6 +183,28 @@ DefaultCommit<Impl>::regStats()
         .name(name() + ".branchMispredicts")
         .desc("The number of times a branch was mispredicted")
         .prereq(branchMispredicts);
+
+    // [InvisiSpec] stat for squash due to invalidation, failed validation
+    loadHitInvalidations
+        .name(name() + ".loadHitInvalidations")
+        .desc("The number of times a load hits a invalidation");
+        //.prereq(loadHitInvalidations);
+
+    loadHitExternalEvictions
+        .name(name() + ".loadHitExternalEvictions")
+        .desc("The number of times a load hits an external invalidation");
+        //.prereq(loadHitInvalidations);
+
+    loadValidationFails
+        .name(name() + ".loadValidationFails")
+        .desc("The number of times a load fails validation");
+        //.prereq(loadValidationFails);
+
+    validationStalls
+        .name(name() + ".validationStalls")
+        .desc("The number of ticks the commit is stalled due to waiting "
+                "for validation responses");
+        //.prereq(loadValidationFails);
 
     numCommittedDist
         .init(0,commitWidth,1)
@@ -579,6 +602,9 @@ DefaultCommit<Impl>::squashAll(ThreadID tid)
     toIEW->commitInfo[tid].squashInst = NULL;
 
     toIEW->commitInfo[tid].pc = pc[tid];
+
+    //TODO: send a packet to SpecBuffer to indicate flush
+    //
 }
 
 template <class Impl>
@@ -705,13 +731,21 @@ DefaultCommit<Impl>::tick()
         } else if (!rob->isEmpty(tid)) {
             DynInstPtr inst = rob->readHeadInst(tid);
 
+            if (inst->isExecuted() && inst->needPostFetch()
+                    && !inst->isExposeCompleted()){
+                //stall due to waiting for validation response
+                if (curTick()-lastCommitTick > 0){
+                    validationStalls+= curTick()-lastCommitTick;
+                }
+
+            }
             ppCommitStall->notify(inst);
 
             DPRINTF(Commit,"[tid:%i]: Can't commit, Instruction [sn:%lli] PC "
                     "%s is head of ROB and not ready\n",
                     tid, inst->seqNum, inst->pcState());
         }
-
+        lastCommitTick = curTick();
         DPRINTF(Commit, "[tid:%i]: ROB has %d insts & %d free entries.\n",
                 tid, rob->countInsts(tid), rob->numFreeEntries(tid));
     }
@@ -832,6 +866,7 @@ DefaultCommit<Impl>::commit()
             squashFromTrap(tid);
         } else if (tcSquash[tid]) {
             assert(commitStatus[tid] != TrapPending);
+            //TC: thread context. [mengjia]
             squashFromTC(tid);
         } else if (commitStatus[tid] == SquashAfterPending) {
             // A squash from the previous cycle of the commit stage (i.e.,
@@ -1039,6 +1074,7 @@ DefaultCommit<Impl>::commitInsts()
                 toIEW->commitInfo[tid].doneSeqNum = head_inst->seqNum;
 
                 if (tid == 0) {
+                    //maybe we can use this to mask interrupts [mengjia]
                     canHandleInterrupts =  (!head_inst->isDelayedCommit()) &&
                                            ((THE_ISA != ALPHA_ISA) ||
                                              (!(pc[0].instAddr() & 0x3)));
@@ -1219,6 +1255,8 @@ DefaultCommit<Impl>::commitHead(DynInstPtr &head_inst, unsigned inst_num)
         // execution doesn't generate extra squashes.
         thread[tid]->noSquashFromTC = true;
 
+        // [InvisiSpec] update squash stat for invalidation or validation fails
+        updateSquashStats(head_inst);
         // Execute the trap.  Although it's slightly unrealistic in
         // terms of timing (as it doesn't wait for the full timing of
         // the trap event to complete before updating state), it's
@@ -1350,6 +1388,7 @@ DefaultCommit<Impl>::markCompletedInsts()
     // Grab completed insts out of the IEW instruction queue, and mark
     // instructions completed within the ROB.
     for (int inst_num = 0; inst_num < fromIEW->size; ++inst_num) {
+        DPRINTF(Commit, "get the inst [num:%d]\n", inst_num);
         assert(fromIEW->insts[inst_num]);
         if (!fromIEW->insts[inst_num]->isSquashed()) {
             DPRINTF(Commit, "[tid:%i]: Marking PC %s, [sn:%lli] ready "
@@ -1361,6 +1400,27 @@ DefaultCommit<Impl>::markCompletedInsts()
             // Mark the instruction as ready to commit.
             fromIEW->insts[inst_num]->setCanCommit();
         }
+    }
+
+    // [InvisiSpec]
+    // update load status
+    // isPrevInstsCompleted; isPrevBrsResolved
+    rob->updateVisibleState();
+}
+
+// [InvisiSpec] update squash stat for loads
+template <class Impl>
+void
+DefaultCommit<Impl>::updateSquashStats(DynInstPtr &inst)
+{
+    if (inst->hitInvalidation()){
+        loadHitInvalidations++;
+    }
+    if (inst->validationFail()){
+        loadValidationFails++;
+    }
+    if (inst->hitExternalEviction()){
+        loadHitExternalEvictions++;
     }
 }
 

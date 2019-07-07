@@ -113,7 +113,7 @@ structure (Sequencer, external = "yes") {
                      Cycles, Cycles, Cycles);
 
   void checkCoherence(Addr);
-  void evictionCallback(Addr);
+  void evictionCallback(Addr, bool);
   void recordRequestType(SequencerRequestType);
   bool checkResourceAvailable(CacheResourceType, Addr);
   void invalidateSC(Addr);
@@ -172,6 +172,7 @@ structure(RubyRequest, desc="...", interface="Message", external="yes") {
   HSAScope scope,            desc="HSA scope";
   HSASegment segment,        desc="HSA segment";
   PacketPtr pkt,             desc="Packet associated with this request";
+  int idx,                   desc="LQ index";
 }
 
 structure(AbstractEntry, primitive="yes", external = "yes") {

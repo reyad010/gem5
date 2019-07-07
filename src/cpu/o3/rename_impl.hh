@@ -580,7 +580,12 @@ DefaultRename<Impl>::renameInsts(ThreadID tid)
             tid, instsInProgress[tid], fromIEW->iewInfo[tid].dispatched);
 
     // Handle serializing the next instruction if necessary.
-    if (serializeOnNextInst[tid]) {
+    // Add one more serializing condition [mengjia]
+    if (serializeOnNextInst[tid] || insts_to_rename.front()->isBlock()) {
+        if(insts_to_rename.front()->isBlock()){
+            DPRINTF(Rename, "Rename got rdtscp instructions for thread %d and ROB empty: %d, instProgress: %d, handled: %d.\n", 
+                    tid, emptyROB[tid],  instsInProgress[tid], insts_to_rename.front()->isSerializeHandled());
+        }
         if (emptyROB[tid] && instsInProgress[tid] == 0) {
             // ROB already empty; no need to serialize.
             serializeOnNextInst[tid] = false;
@@ -669,6 +674,12 @@ DefaultRename<Impl>::renameInsts(ThreadID tid)
         // instructions.  This is mainly due to lack of support for
         // out-of-order operations of either of those classes of
         // instructions.
+        
+        // added debug infor for block state / rdtscp [mengjia]
+        if(inst->isBlock()){
+            DPRINTF(Rename, "Rename got rdtscp instructions for thread %d and ROB empty: %d, instProgress: %d, handled: %d.\n", 
+                tid, emptyROB[tid],  instsInProgress[tid], inst->isSerializeHandled());
+        }
         if ((inst->isIprAccess() || inst->isSerializeBefore()) &&
             !inst->isSerializeHandled()) {
             DPRINTF(Rename, "Serialize before instruction encountered.\n");
@@ -685,7 +696,7 @@ DefaultRename<Impl>::renameInsts(ThreadID tid)
             renameStatus[tid] = SerializeStall;
 
             serializeInst[tid] = inst;
-
+            
             blockThisCycle = true;
 
             break;
@@ -1370,7 +1381,8 @@ DefaultRename<Impl>::serializeAfter(InstQueue &inst_list, ThreadID tid)
         // Mark a bit to say that I must serialize on the next instruction.
         serializeOnNextInst[tid] = true;
         return;
-    }
+    } 
+    
 
     // Set the next instruction as serializing.
     inst_list.front()->setSerializeBefore();

@@ -63,6 +63,8 @@ from common import MemConfig
 from common.Caches import *
 from common.cpu2000 import *
 
+import spec06_benchmarks
+
 # Check if KVM support has been enabled, we might need to do VM
 # configuration if that's the case.
 have_kvm_support = 'BaseKvmCPU' in globals()
@@ -125,6 +127,10 @@ parser = optparse.OptionParser()
 Options.addCommonOptions(parser)
 Options.addSEOptions(parser)
 
+parser.add_option("-b", "--benchmark", type="string", default="", help="The SPEC benchmark to be loaded.")
+parser.add_option("--benchmark_stdout", type="string", default="", help="Absolute path for stdout redirection for the benchmark.")
+parser.add_option("--benchmark_stderr", type="string", default="", help="Absolute path for stderr redirection for the benchmark.")
+
 if '--ruby' in sys.argv:
     Ruby.define_options(parser)
 
@@ -134,36 +140,146 @@ if args:
     print "Error: script doesn't take any positional arguments"
     sys.exit(1)
 
-multiprocesses = []
+#multiprocesses = []
 numThreads = 1
 
-if options.bench:
-    apps = options.bench.split("-")
-    if len(apps) != options.num_cpus:
-        print "number of benchmarks not equal to set num_cpus!"
+if options.benchmark:
+    print 'Selected SPEC_CPU2006 benchmark'
+    if options.benchmark == 'perlbench':
+        print '--> perlbench'
+        process = spec06_benchmarks.perlbench
+    elif options.benchmark == 'bzip2':
+        print '--> bzip2'
+        process = spec06_benchmarks.bzip2
+    elif options.benchmark == 'gcc':
+        print '--> gcc'
+        process = spec06_benchmarks.gcc
+    elif options.benchmark == 'bwaves':
+        print '--> bwaves'
+        process = spec06_benchmarks.bwaves
+    elif options.benchmark == 'gamess':
+        print '--> gamess'
+        process = spec06_benchmarks.gamess
+    elif options.benchmark == 'mcf':
+        print '--> mcf'
+        process = spec06_benchmarks.mcf
+    elif options.benchmark == 'milc':
+        print '--> milc'
+        process = spec06_benchmarks.milc
+    elif options.benchmark == 'zeusmp':
+        print '--> zeusmp'
+        process = spec06_benchmarks.zeusmp
+    elif options.benchmark == 'gromacs':
+        print '--> gromacs'
+        process = spec06_benchmarks.gromacs
+    elif options.benchmark == 'cactusADM':
+        print '--> cactusADM'
+        process = spec06_benchmarks.cactusADM
+    elif options.benchmark == 'leslie3d':
+        print '--> leslie3d'
+        process = spec06_benchmarks.leslie3d
+    elif options.benchmark == 'namd':
+        print '--> namd'
+        process = spec06_benchmarks.namd
+    elif options.benchmark == 'gobmk':
+        print '--> gobmk'
+        process = spec06_benchmarks.gobmk
+    elif options.benchmark == 'dealII':
+        print '--> dealII'
+        process = spec06_benchmarks.dealII
+    elif options.benchmark == 'soplex':
+        print '--> soplex'
+        process = spec06_benchmarks.soplex
+    elif options.benchmark == 'povray':
+        print '--> povray'
+        process = spec06_benchmarks.povray
+    elif options.benchmark == 'calculix':
+        print '--> calculix'
+        process = spec06_benchmarks.calculix
+    elif options.benchmark == 'hmmer':
+        print '--> hmmer'
+        process = spec06_benchmarks.hmmer
+    elif options.benchmark == 'sjeng':
+        print '--> sjeng'
+        process = spec06_benchmarks.sjeng
+    elif options.benchmark == 'GemsFDTD':
+        print '--> GemsFDTD'
+        process = spec06_benchmarks.GemsFDTD
+    elif options.benchmark == 'libquantum':
+        print '--> libquantum'
+        process = spec06_benchmarks.libquantum
+    elif options.benchmark == 'h264ref':
+        print '--> h264ref'
+        process = spec06_benchmarks.h264ref
+    elif options.benchmark == 'tonto':
+        print '--> tonto'
+        process = spec06_benchmarks.tonto
+    elif options.benchmark == 'lbm':
+        print '--> lbm'
+        process = spec06_benchmarks.lbm
+    elif options.benchmark == 'omnetpp':
+        print '--> omnetpp'
+        process = spec06_benchmarks.omnetpp
+    elif options.benchmark == 'astar':
+        print '--> astar'
+        process = spec06_benchmarks.astar
+    elif options.benchmark == 'wrf':
+        print '--> wrf'
+        process = spec06_benchmarks.wrf
+    elif options.benchmark == 'sphinx3':
+        print '--> sphinx3'
+        process = spec06_benchmarks.sphinx3
+    elif options.benchmark == 'xalancbmk':
+        print '--> xalancbmk'
+        process = spec06_benchmarks.xalancbmk
+    elif options.benchmark == 'specrand_i':
+        print '--> specrand_i'
+        process = spec06_benchmarks.specrand_i
+    elif options.benchmark == 'specrand_f':
+        print '--> specrand_f'
+        process = spec06_benchmarks.specrand_f
+    else:
+        print "No recognized SPEC2006 benchmark selected! Exiting."
         sys.exit(1)
-
-    for app in apps:
-        try:
-            if buildEnv['TARGET_ISA'] == 'alpha':
-                exec("workload = %s('alpha', 'tru64', '%s')" % (
-                        app, options.spec_input))
-            elif buildEnv['TARGET_ISA'] == 'arm':
-                exec("workload = %s('arm_%s', 'linux', '%s')" % (
-                        app, options.arm_iset, options.spec_input))
-            else:
-                exec("workload = %s(buildEnv['TARGET_ISA', 'linux', '%s')" % (
-                        app, options.spec_input))
-            multiprocesses.append(workload.makeProcess())
-        except:
-            print >>sys.stderr, "Unable to find workload for %s: %s" % (
-                    buildEnv['TARGET_ISA'], app)
-            sys.exit(1)
-elif options.cmd:
-    multiprocesses, numThreads = get_processes(options)
 else:
-    print >> sys.stderr, "No workload specified. Exiting!\n"
+    print >> sys.stderr, "Need --benchmark switch to specify SPEC CPU2006 workload. Exiting!\n"
     sys.exit(1)
+
+# Set process stdout/stderr
+if options.benchmark_stdout:
+    process.output = options.benchmark_stdout
+    print "Process stdout file: " + process.output
+if options.benchmark_stderr:
+    process.errout = options.benchmark_stderr
+    print "Process stderr file: " + process.errout
+
+#if options.bench:
+#    apps = options.bench.split("-")
+#    if len(apps) != options.num_cpus:
+#        print "number of benchmarks not equal to set num_cpus!"
+#        sys.exit(1)
+#
+#    for app in apps:
+#        try:
+#            if buildEnv['TARGET_ISA'] == 'alpha':
+#                exec("workload = %s('alpha', 'tru64', '%s')" % (
+#                        app, options.spec_input))
+#            elif buildEnv['TARGET_ISA'] == 'arm':
+#                exec("workload = %s('arm_%s', 'linux', '%s')" % (
+#                        app, options.arm_iset, options.spec_input))
+#            else:
+#                exec("workload = %s(buildEnv['TARGET_ISA', 'linux', '%s')" % (
+#                        app, options.spec_input))
+#            multiprocesses.append(workload.makeProcess())
+#        except:
+#            print >>sys.stderr, "Unable to find workload for %s: %s" % (
+#                    buildEnv['TARGET_ISA'], app)
+#            sys.exit(1)
+#elif options.cmd:
+#    multiprocesses, numThreads = get_processes(options)
+#else:
+#    print >> sys.stderr, "No workload specified. Exiting!\n"
+#    sys.exit(1)
 
 
 (CPUClass, test_mem_mode, FutureClass) = Simulation.setCPUClass(options)
@@ -231,12 +347,15 @@ if options.simpoint_profile:
         fatal("SimPoint generation not supported with more than one CPUs")
 
 for i in xrange(np):
-    if options.smt:
-        system.cpu[i].workload = multiprocesses
-    elif len(multiprocesses) == 1:
-        system.cpu[i].workload = multiprocesses[0]
-    else:
-        system.cpu[i].workload = multiprocesses[i]
+    system.cpu[i].workload = process
+    print process.cmd
+
+    #if options.smt:
+    #    system.cpu[i].workload = multiprocesses
+    #elif len(multiprocesses) == 1:
+    #    system.cpu[i].workload = multiprocesses[0]
+    #else:
+    #    system.cpu[i].workload = multiprocesses[i]
 
     if options.fastmem:
         system.cpu[i].fastmem = True

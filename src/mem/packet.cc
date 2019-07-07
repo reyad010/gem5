@@ -219,7 +219,24 @@ MemCmd::commandInfo[] =
       InvalidateResp, "InvalidateReq" },
     /* Invalidation Response */
     { SET2(IsInvalidate, IsResponse),
-      InvalidCmd, "InvalidateResp" }
+      InvalidCmd, "InvalidateResp" },
+    /* [InvisiSpec] New command info */
+    { SET4(IsRead, IsRequest, NeedsResponse, IsSpec),
+      ReadSpecResp, "ReadSpecReq" },
+    { SET4(IsRead, IsResponse, HasData, IsSpec),
+      InvalidCmd, "ReadSpecResp" },
+    { SET4(IsRead, IsRequest, NeedsResponse, IsValidate),
+      ValidateResp, "ValidateReq" },
+    { SET4(IsRead, IsResponse, HasData, IsValidate),
+      InvalidCmd, "ValidateResp" },
+    { SET4(IsRead, IsRequest, NeedsResponse, IsExpose),
+      ExposeResp, "ExposeReq" },
+    { SET3(IsRead, IsResponse, IsExpose),
+      InvalidCmd, "ExposeResp" },
+    { SET3(IsRequest, NeedsResponse, IsSpecFlush),
+      SpecFlushResp, "SpecFlushReq" },
+    { SET2(IsResponse, IsSpecFlush),
+      InvalidCmd, "SpecFlushResp" }
 };
 
 bool

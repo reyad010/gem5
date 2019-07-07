@@ -535,6 +535,11 @@ TLB::regStats()
         .name(name() + ".prefetch_faults")
         .desc("Number of TLB faults due to prefetch")
         ;
+    
+    specTLBMisses 
+        .name(name() + ".spec_tlb_misses")
+        .desc("Number of TLB misses from a speculative mem instructions")
+        ;
 
     domainFaults
         .name(name() + ".domain_faults")
@@ -1419,6 +1424,17 @@ TLB::getTE(TlbEntry **te, RequestPtr req, ThreadContext *tc, Mode mode,
             // any further with the memory access (here we can safely use the
             // fault status for the short desc. format in all cases)
            prefetchFaults++;
+           return std::make_shared<PrefetchAbort>(
+               vaddr_tainted, ArmFault::PrefetchTLBMiss, isStage2);
+        }
+
+        if (req->isSpec()) {
+            // if the request is a prefetch don't attempt to fill the TLB or go
+            // any further with the memory access (here we can safely use the
+            // fault status for the short desc. format in all cases)
+           specTLBMisses++;
+           //FIXME: currently resue the prefetch tlbmiss fault
+           //do not want to introduce new fault declaration
            return std::make_shared<PrefetchAbort>(
                vaddr_tainted, ArmFault::PrefetchTLBMiss, isStage2);
         }

@@ -146,6 +146,9 @@ let {{
             self.adjust_disp += val
         def serializing(self):
             self.serializing = True
+        # define directive [mengjia]
+        def block(self):
+            self.block = True
 
         def function_call(self):
             self.function_call = True
@@ -159,6 +162,8 @@ let {{
                 "adjust_imm" : self.adjustImm,
                 "adjust_disp" : self.adjustDisp,
                 "serializing" : self.serializing,
+                # add directives block [mengjia]
+                "block" : self.block, 
                 "function_call" : self.function_call,
                 "function_return" : self.function_return
             }
@@ -176,6 +181,8 @@ let {{
                 adjustedDisp = adjustedDisp;
             '''
             self.serializing = False
+            # initialize as false [mengjia]
+            self.block = False 
             self.function_call = False
             self.function_return = False
 
@@ -212,6 +219,10 @@ let {{
                     if self.serializing:
                         flags.append("IsSerializing")
                         flags.append("IsSerializeAfter")
+                    # add new attribute for block [mengjia]
+                    if self.block:
+                        flags.append("IsBlock")
+                        flags.append("IsSerializeBefore")
 
                     if self.function_call:
                         flags.append("IsCall")

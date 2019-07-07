@@ -53,6 +53,7 @@
 /// Initiate a read from memory in timing mode.  Note that the 'mem'
 /// parameter is unused; only the type of that parameter is used
 /// to determine the size of the access.
+// XC: executeContextPtr [mengjia]
 template <class XC, class MemT>
 Fault
 initiateMemRead(XC *xc, Trace::InstRecord *traceData, Addr addr,
