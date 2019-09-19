@@ -107,6 +107,7 @@ def get_processes(options):
             process.errout = errouts[idx]
 
         multiprocesses.append(process)
+        print("Workload name: "+ wrkld)
         idx += 1
 
     if options.smt:
@@ -138,6 +139,7 @@ if options.bench:
         print("number of benchmarks not equal to set num_cpus!")
         sys.exit(1)
 
+    print("number of apps: " + len(apps))
     for app in apps:
         try:
             if buildEnv['TARGET_ISA'] == 'alpha':
@@ -170,6 +172,7 @@ if options.smt and options.num_cpus > 1:
     fatal("You cannot use SMT with multiple CPUs!")
 
 np = options.num_cpus
+print("number of CPUs: " + str(np))
 system = System(cpu = [CPUClass(cpu_id=i) for i in xrange(np)],
                 mem_mode = test_mem_mode,
                 mem_ranges = [AddrRange(options.mem_size)],
@@ -267,3 +270,4 @@ else:
 
 root = Root(full_system = False, system = system)
 Simulation.run(options, root, system, FutureClass)
+

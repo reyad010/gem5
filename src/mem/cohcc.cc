@@ -55,9 +55,35 @@
 #include "debug/AddrRanges.hh"
 #include "debug/CoherentXBar.hh"
 #include "sim/system.hh"
+#include "base/random.hh"
+//#include "cache/C_Cache.h"
+#include <iostream>
+#include <map>
+
+using namespace std;
+
+
+
+list<PacketPtr> dummyPacketQueue;
+list<PortID> portQueue;
+
+//CounterCache *c= new CounterCache();
+
+uint8_t *pkt_data = new uint8_t[1];
+uint32_t counter_write = 0 ;
+uint32_t counter_read = 0 ;
+uint32_t data_write = 0;
+uint32_t data_read=0;
+uint32_t hit=0;
+uint32_t miss =0;
 
 CoherentXBar::CoherentXBar(const CoherentXBarParams *p)
-    : BaseXBar(p), system(p->system), snoopFilter(p->snoop_filter),
+    : BaseXBar(p), 
+    XbardummyReadEvent([this]{ processXbardummyReadEvent(); }, name()),
+    XbardummyWriteEvent([this]{ processXbardummyWriteEvent(); }, name()),
+    XbarSendPacketEvent([this]{ processSendPacketEvent(); }, name()),
+    XbarFakeEvent([this]{ processFakeEvent(); }, name()),
+    system(p->system), snoopFilter(p->snoop_filter),
       snoopResponseLatency(p->snoop_response_latency),
       pointOfCoherency(p->point_of_coherency),
       pointOfUnification(p->point_of_unification)
@@ -118,13 +144,20 @@ CoherentXBar::init()
 {
     BaseXBar::init();
 
+
+    
+
+    if(!XbarSendPacketEvent.scheduled()){
+        schedule(XbarSendPacketEvent, curTick()+1500);
+    }
+
     // iterate over our slave ports and determine which of our
     // neighbouring master ports are snooping and add them as snoopers
     for (const auto& p: slavePorts) {
         // check if the connected master port is snooping
         if (p->isSnooping()) {
             DPRINTF(AddrRanges, "Adding snooping master %s\n",
-                    p->getMasterPort().name());
+            p->getMasterPort().name());
             snoopPorts.push_back(p);
         }
     }
@@ -138,11 +171,202 @@ CoherentXBar::init()
         snoopFilter->setSlavePorts(slavePorts);
 }
 
+void
+CoherentXBar::processFakeEvent(){
+    ////cout << "before calling fake" << endl;
+    if(XbarSendPacketEvent.scheduled())
+    deschedule(XbarSendPacketEvent);
+    schedule(XbarSendPacketEvent,curTick()+100);
+}
+
+
+void
+CoherentXBar::processSendPacketEvent(){
+
+
+    
+
+    if(!(dummyPacketQueue.empty())&&!(portQueue.empty())){
+        ////cout << " sending dummy packets from queue ######################## " << dummyPacketQueue.size() << " " << dummyPacketQueue.front()->getAddr()<< " "<<portQueue.front() << endl;
+        //AddrRange addr_range = RangeSize(dummyPacketQueue.front()->getAddr(), dummyPacketQueue.front()->getSize());
+        //PortID master_port_id = findPort(addr_range);
+        //Tick x = dummyPacketQueue.front()->payloadDelay;
+        ////cout << "addr " << dummyPacketQueue.front() << "portid "<< portQueue.front()<<endl;
+        actualRcvTiming(dummyPacketQueue.front(),portQueue.front());
+        //Tick packetFinishTime = clockEdge(Cycles(1)) + dummyPacketQueue.front()->payloadDelay;
+        //reqLayers[master_port_id]->succeededTiming(packetFinishTime);
+        //bool succ = masterPorts[master_port_id]->sendTimingReq(dummyPacketQueue.front());
+        //if(succ == true){
+            //reqLayers[master_port_id]->succeededTiming(curTick()+dummyPacketQueue.front()->payloadDelay);
+        //}
+        
+        dummyPacketQueue.pop_front();
+        portQueue.pop_front();
+        ////cout << "before calling fake" << endl;
+        
+    
+        
+    }
+
+ if(XbarFakeEvent.scheduled())
+    deschedule(XbarFakeEvent);
+    schedule(XbarFakeEvent,curTick()+400000 );   
+
+
+}
+
+
+
+void
+CoherentXBar::processXbardummyReadEvent(){
+    
+}
+
+void
+CoherentXBar::processXbardummyWriteEvent(){
+
+}
+
+
+
+void 
+CoherentXBar::sendDummyRead(PortID portId){
+     //unsigned long long address =0;
+
+////cout << "event called : dummy read" << endl;
+
+    unsigned ofst = (64*(int)(random_mt.random(1, 10)));
+//AddrRange(pkt->getAddr(),pkt->getAddr() + (pkt->getSize() - 1)).isSubset(range)
+////cout << "sending dummy request "  << ofst <<  endl;   
+    PacketPtr dummy_pkt = nullptr;
+    
+    Request::Flags flags;
+
+    RequestPtr req = std::make_shared<Request>((unsigned long long int) 16*1024*1024*1024-ofst ,64, flags, Request::funcMasterId);
+    req->setContext(1);
+    dummy_pkt = new Packet(req, MemCmd::ReadReq);
+    dummy_pkt->dataDynamic(pkt_data);
+
+    //AddrRange addr_range = RangeSize(dummy_pkt->getAddr(), dummy_pkt->getSize());
+    //PortID master_port_id = findPort(addr_range);
+
+    //Tick old_header_delay = dummy_pkt->headerDelay;
+
+    // a request sees the frontend and forward latency
+    Tick xbar_delay = (frontendLatency + forwardLatency) * clockPeriod();
+
+    // set the packet header and payload delay
+    calcPacketTiming(dummy_pkt, xbar_delay);
+
+    // determine how long to be crossbar layer is busy
+    // Tick packetFinishTime = clockEdge(Cycles(1)) + dummy_pkt->payloadDelay;
+
+    dummy_pkt->payloadDelay+=60000;
+    //dummy_pkt->payloadDelay+=10000000;
+
+    dummyPacketQueue.push_back(dummy_pkt);
+    portQueue.push_back(portId);
+
+    counter_read++;
+
+    //masterPorts[master_port_id]->sendTimingReq(dummy_pkt);
+
+
+    //recvTimingReq(pkt_data,slavePorts[1]);
+    //dummy_pkt->makeResponse();
+            
+    //unsigned size = dummy_pkt->getSize();
+    //unsigned offset = dummy_pkt->getAddr() & (burstSize - 1);
+    //unsigned int dram_pkt_count = divCeil(offset + size, burstSize);
+    //packet->dataDynamic(pkt_data);
+    //addToReadQueue(packet, dram_pkt_count);
+    //readReqs++;
+    //bytesReadSys += size;
+    //writeReqs++;
+    //bytesWrittenSys += size;
+
+    //port.schedTimingResp(dummy_pkt, curTick() + 100);
+
+/*if(!XbardummyReadEvent.scheduled()){
+    schedule(XbardummyReadEvent,curTick()+2000);
+}*/
+
+//schedule(XbarSendPacketEvent,curTick()+1000);
+
+    
+}
+
+void 
+CoherentXBar::sendDummyWrite(PortID portId){
+     //unsigned long long address =0;
+
+    ////cout << "event called : dummy write--" << endl;
+
+    unsigned ofst = (64*(int)(random_mt.random(1, 10)));
+//AddrRange(pkt->getAddr(),pkt->getAddr() + (pkt->getSize() - 1)).isSubset(range)
+////cout << "sending dummy request "  << ofst <<  endl;   
+    PacketPtr dummy_pkt = nullptr;
+    
+    Request::Flags flags;
+
+    RequestPtr req = std::make_shared<Request>((unsigned long long int) 16*1024*1024*1024-ofst ,64, flags, Request::funcMasterId);
+    req->setContext(1);
+    dummy_pkt = new Packet(req, MemCmd::WriteReq);
+    dummy_pkt->dataDynamic(pkt_data);
+
+    //AddrRange addr_range = RangeSize(dummy_pkt->getAddr(), dummy_pkt->getSize());
+    //PortID master_port_id = findPort(addr_range);
+
+    //Tick old_header_delay = dummy_pkt->headerDelay;
+
+    // a request sees the frontend and forward latency
+    Tick xbar_delay = (frontendLatency + forwardLatency) * clockPeriod();
+
+    // set the packet header and payload delay
+    calcPacketTiming(dummy_pkt, xbar_delay);
+
+    // determine how long to be crossbar layer is busy
+    // Tick packetFinishTime = clockEdge(Cycles(1)) + dummy_pkt->payloadDelay;
+
+    dummy_pkt->payloadDelay+=150000;
+    //dummy_pkt->payloadDelay+=10000000;
+
+    dummyPacketQueue.push_back(dummy_pkt);
+    portQueue.push_back(portId);
+    counter_write++;
+
+    //masterPorts[master_port_id]->sendTimingReq(dummy_pkt);
+
+
+    //recvTimingReq(pkt_data,slavePorts[1]);
+    //dummy_pkt->makeResponse();
+            
+    //unsigned size = dummy_pkt->getSize();
+    //unsigned offset = dummy_pkt->getAddr() & (burstSize - 1);
+    //unsigned int dram_pkt_count = divCeil(offset + size, burstSize);
+    //packet->dataDynamic(pkt_data);
+    //addToReadQueue(packet, dram_pkt_count);
+    //readReqs++;
+    //bytesReadSys += size;
+    //writeReqs++;
+    //bytesWrittenSys += size;
+
+    //port.schedTimingResp(dummy_pkt, curTick() + 100);
+
+/*
+if(!XbardummyWriteEvent.scheduled()){
+    schedule(XbardummyWriteEvent,curTick()+2000);
+}*/
+
+//schedule(XbarSendPacketEvent,curTick()+1010);
+    
+}
+
 bool
-CoherentXBar::recvTimingReq(PacketPtr pkt, PortID slave_port_id)
-{
-    // determine the source port based on the id
+CoherentXBar::actualRcvTiming(PacketPtr pkt, PortID slave_port_id){
     SlavePort *src_port = slavePorts[slave_port_id];
+
+    ////cout << "slave port id " << slave_port_id << " pkt adr " << pkt->getAddr() << endl;
 
     // remember if the packet is an express snoop
     bool is_express_snoop = pkt->isExpressSnoop();
@@ -331,8 +555,9 @@ CoherentXBar::recvTimingReq(PacketPtr pkt, PortID slave_port_id)
             }
 
             // remember where to route the normal response to
-            if (expect_response || expect_snoop_resp) {
-                assert(routeTo.find(pkt->req) == routeTo.end());
+            if ((expect_response || expect_snoop_resp)&&pkt->getAddr()<17179868544) {
+                ////cout << "*slave port id " << slave_port_id << " pkt adr " << pkt->getAddr() << endl;
+                //assert(routeTo.find(pkt->req) == routeTo.end());
                 routeTo[pkt->req] = slave_port_id;
 
                 panic_if(routeTo.size() > 512,
@@ -433,17 +658,145 @@ CoherentXBar::recvTimingReq(PacketPtr pkt, PortID slave_port_id)
     return success;
 }
 
+
+
+bool
+CoherentXBar::recvTimingReq(PacketPtr pkt, PortID slave_port_id)
+{
+
+    ////cout << " \n\n||>>>>>> "  << pkt->getAddr() <<"slave port "<< slave_port_id <<endl;
+
+    
+    //dummyPacketQueue.push_back(pkt);
+    //portQueue.push_back(slave_port_id);
+    ////cout << " spi in ft " << portQueue.front() << endl;
+
+    /*/actualRcvTiming(pkt,slave_port_id);
+
+    uint32_t evicted = 0xffffffff;
+    // determine the source port based on the id
+
+    //sendDummyRead(slave_port_id);
+    //sendDummyWrite(slave_port_id);
+    ////////////////////////////////////////////////////////////////////////////////////////////
+    if(pkt->isRead()){
+
+        if(c->hasCounter(pkt->getAddr())){
+            ////cout << "cache hit while reading " << endl;
+            hit++;
+            //cache lookup latency
+
+        }
+        else{
+            ////cout << "cache miss while reading " << endl;
+            miss++;
+            //read counter from memory
+            sendDummyRead(slave_port_id);
+            //sendDummyWrite(slave_port_id);
+            evicted = c->PushInCache(pkt->getAddr(),'w');
+            if(evicted!=0xffffffff){
+                ////cout << "evicting " << evicted << endl;
+                //dummy write to memory
+                sendDummyWrite(slave_port_id);
+            }
+            else{
+                ////cout << "not evicting " << evicted << endl;
+            } ///
+
+        }
+        //encryption delay
+        ////cout << "reading " << pkt->getAddr() << endl;
+        
+    }
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+    else if(pkt->isWrite()){
+        ////cout << "writing " << pkt->getAddr() << endl;
+        //
+
+//getting counter       
+        if(c->hasCounter(pkt->getAddr())){
+            ////cout << "cache hit while writing (getting) " << endl;
+            hit++;
+            //cache lookup latency
+    
+        }
+        else{
+            ////cout << "miss while writing " << endl;
+            miss++;
+            //dummy read memory
+            sendDummyRead(slave_port_id);
+            //sendDummyWrite(slave_port_id);
+            //cache write latency
+            evicted = c->PushInCache(pkt->getAddr(),'w');
+
+            if(evicted!=0xffffffff){
+                ////cout << "evicting " << evicted << endl;
+                //dummy write to memory
+                sendDummyWrite(slave_port_id);
+            }
+            else{
+                ////cout << "not evicting " << evicted << endl;
+            }////
+            //cache lookup latency
+            //counters.find((pkt->getAddr()&& 0xFC0) >> 6)->second=0;
+        }
+
+//encryption latency
+//increment counter
+//write counter
+        if(c->hasCounter(pkt->getAddr())){
+            ////cout << "cache hit while writing (pushing)" << endl;
+            hit++;
+            c->PushInCache(pkt->getAddr(),'w');
+/////////////////////////////////////////OSIRIS////////////////////////////////////////
+
+            ////cout << " osiris " << counters.find((pkt->getAddr()&& 0xFC0) >> 6)->second ;
+
+            counters.find((pkt->getAddr()&& 0xFC0) >> 6)->second++;
+            if( ((counters.find((pkt->getAddr()&& 0xFC0) >> 6)->second)>=4) ) {
+                counters.find((pkt->getAddr()&& 0xFC0) >> 6)->second=0;
+                //sendDummyWrite(slave_port_id);
+            ////cout << "\n\n\n OSIRIS Case Arised ----------------------------------------->\n\n\n" << pkt->getAddr() << " "<< counters.find((pkt->getAddr()&& 0xFC0) >> 6)->second << endl;
+        }
+
+///////////////////////////////////////////////////////////////////////////////////////
+        }
+
+
+        
+
+        
+    }
+
+ ////cout << endl;
+ ////cout << " MR-" << data_read << " MW-" << data_write << " CR-" << counter_read << " CW-" << counter_write << endl;
+ ////cout << " hit-" << hit << " miss-" << miss << endl;
+////*/
+
+cacheHit=hit;
+ cacheMiss=miss;
+ return actualRcvTiming(pkt,slave_port_id);;   
+
+
+
+ 
+}
+
 bool
 CoherentXBar::recvTimingResp(PacketPtr pkt, PortID master_port_id)
 {
+
+    ////cout << "recv timing resp coherent_xbar " << pkt->getAddr() << endl ;
+
+    if(pkt->getAddr()>=17179868544){
+        return true;
+    }
     // determine the source port based on the id
     MasterPort *src_port = masterPorts[master_port_id];
 
-if(pkt->getAddr()>=17179607040){
-        return true;
-    }
     // determine the destination
     const auto route_lookup = routeTo.find(pkt->req);
+    ////cout << route_lookup->second << " " << routeTo.end()->second << endl;
     assert(route_lookup != routeTo.end());
     const PortID slave_port_id = route_lookup->second;
     assert(slave_port_id != InvalidPortID);
@@ -1111,6 +1464,17 @@ CoherentXBar::regStats()
         l->regStats();
     for (auto l: snoopLayers)
         l->regStats();
+
+
+    cacheHit
+        .name(name()+".cacheHit")
+        .desc("Total Counter Cache Hit Count")
+    ;
+
+    cacheMiss
+        .name(name()+".cacheMiss")
+        .desc("Total Counter Cache Miss Count")
+    ;
 
     snoops
         .name(name() + ".snoops")

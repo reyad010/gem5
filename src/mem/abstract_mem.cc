@@ -73,9 +73,10 @@ AbstractMemory::init()
 }
 
 void
-AbstractMemory::setBackingStore(uint8_t* pmem_addr)
+AbstractMemory::setBackingStore(uint8_t* pmem_addr, uint8_t* pmemEncrypt_addr)
 {
     pmemAddr = pmem_addr;
+    pmemEncryptAddr = pmemEncrypt_addr;
 }
 
 void
@@ -409,6 +410,9 @@ AbstractMemory::access(PacketPtr pkt)
         if (writeOK(pkt)) {
             if (pmemAddr) {
                 memcpy(hostAddr, pkt->getConstPtr<uint8_t>(), pkt->getSize());
+                //for(int i=0; i<pkt->getSize(); i++)
+				//		cout << " writing previous data: " << hostAddr[i];
+                //cout << endl;
                 DPRINTF(MemoryAccess, "%s wrote %i bytes to address %x\n",
                         __func__, pkt->getSize(), pkt->getAddr());
             }
@@ -458,3 +462,59 @@ AbstractMemory::functionalAccess(PacketPtr pkt)
               pkt->cmdString());
     }
 }
+
+void
+AbstractMemory::getMemoryData(PacketPtr pkt, uint8_t *p, uint8_t *s)
+{
+    assert(AddrRange(pkt->getAddr(),
+                     pkt->getAddr() + pkt->getSize() - 1).isSubset(range));
+
+    uint8_t *hostAddr = pmemAddr + pkt->getAddr() - range.start();
+
+    uint8_t *hostEncryptAddr = pmemEncryptAddr + pkt->getAddr() - range.start();
+
+    if (pkt->isWrite() || pkt->isRead()) {
+    	if (pmemAddr) {
+			memcpy(p, hostAddr, pkt->getSize());
+			//cout << " getting hostEncryptAddr: " << std::hex << *s << endl;
+		}
+		else
+			cout << " pmem addr is NULL" << endl;
+
+        if (pmemEncryptAddr) {
+			memcpy(s, hostEncryptAddr, pkt->getSize());
+			//cout << " getting hostEncryptAddr: " << std::hex << *s << endl;
+		}
+		else
+			cout << " pmem encrypt addr is NULL" << endl;
+
+    } else {
+        panic("AbstractMemory: unimplemented get memory command %s",
+              pkt->cmdString());
+    }
+}
+
+void
+AbstractMemory::storeEncryptedData(PacketPtr pkt, uint8_t *p)
+{
+    assert(AddrRange(pkt->getAddr(),
+                     pkt->getAddr() + pkt->getSize() - 1).isSubset(range));
+
+    uint8_t *hostEncryptAddr = pmemEncryptAddr + pkt->getAddr() - range.start();
+
+	if (pkt->isRead()) {
+		assert(!pkt->isWrite());
+		if (pmemEncryptAddr)
+			memcpy(p, hostEncryptAddr, pkt->getSize());
+	}
+	else if (pkt->isWrite()) {
+		if (pmemEncryptAddr) {
+			memcpy(hostEncryptAddr, p, pkt->getSize());
+			//cout << "storing hostEncryptAddr: " << std::hex << *hostEncryptAddr << endl;
+		}
+	} else {
+		panic("Unexpected packet %s", pkt->print());
+	}
+
+}
+

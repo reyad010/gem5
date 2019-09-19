@@ -110,6 +110,9 @@ class AbstractMemory : public MemObject
     // Pointer to host memory used to implement this memory
     uint8_t* pmemAddr;
 
+    // Pointer to host encrypted memory
+    uint8_t* pmemEncryptAddr;
+
     // Enable specific memories to be reported to the configuration table
     const bool confTableReported;
 
@@ -216,7 +219,7 @@ class AbstractMemory : public MemObject
      *
      * @param pmem_addr Pointer to a segment of host memory
      */
-    void setBackingStore(uint8_t* pmem_addr);
+    void setBackingStore(uint8_t* pmem_addr, uint8_t* pmemEncrypt_addr);
 
     /**
      * Get the list of locked addresses to allow checkpointing.
@@ -313,6 +316,17 @@ class AbstractMemory : public MemObject
     void functionalAccess(PacketPtr pkt);
 
     /**
+     * Gets the stored data
+     *
+     */
+    void getMemoryData(PacketPtr pkt, uint8_t *p, uint8_t *s);
+
+    /*
+     * Stores encrypted data
+     */
+    void storeEncryptedData(PacketPtr pkt, uint8_t *p);
+
+    /**
      * Register Statistics
      */
     void regStats() override;
@@ -320,3 +334,4 @@ class AbstractMemory : public MemObject
 };
 
 #endif //__MEM_ABSTRACT_MEMORY_HH__
+
