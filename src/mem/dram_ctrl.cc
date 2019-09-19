@@ -55,14 +55,73 @@
 #include "debug/Drain.hh"
 #include "debug/QOS.hh"
 #include "sim/system.hh"
+#include "base/random.hh"
+#include "cache/C_Cache.h"
+#include "cache/MT_Cachex.h"
+#include <boost/multiprecision/cpp_int.hpp>
+#include <boost/random.hpp>
 
 using namespace std;
 using namespace Data;
+using namespace boost::multiprecision;
+using namespace boost::random;
+
+//const uint64_t MainMemorySize = 17179869184; //16GB 
+
+//const uint64_t CacheSize = 256*1024;
+//const uint64_t Associativity = 8;
+//const uint64_t BlockSize = 64;
+//const uint64_t NoOfSets = (uint32_t)CacheSize/(BlockSize*Associativity);
+//const uint64_t NoOfCounters = (int)MainMemorySize/64;
+
+
+//static map< uint64_t , int > counters;
+//static map< uint64_t , bool > shadowPlus; 
+list<PacketPtr> dummyPacketQ;
+uint8_t *pkt_data_d = new uint8_t[1];
+
+CounterCache *cc= new CounterCache();
+MTCache *mtc=new MTCache();
+
+uint64_t hit_count=0;
+uint64_t miss_count=0;
+uint64_t ocounter=0;
+uint64_t scounter=0;
+uint64_t mtc_scounter=0;
+uint64_t sppcounter=0;
+uint64_t shdPPcounter=0;
+uint64_t mtread=0;
+uint64_t mtwrite=0;
+uint64_t mthit=0;
+uint64_t mtmiss=0;
+
+uint64_t AES=0;
+map<uint64_t,list<uint32_t>* > prev_modified_words;			// used to store each cacheline previous modified words to perform encryption
+map<uint64_t,uint32_t> cacheline_epoch; 	// used to store each cacheline encryption status
+map<uint64_t,uint32_t> cacheline_stats; 	// used to store each cacheline encryption status
+map<uint64_t,uint32_t> cacheline_stats_4; 	// used to store each cacheline encryption status
+map<uint64_t,uint32_t> cacheline_stats_8; 	// used to store each cacheline encryption status
+map<uint64_t,uint32_t> cacheline_stats_16; 	// used to store each cacheline encryption status
+map<uint64_t,uint32_t> cacheline_stats_32; 	// used to store each cacheline encryption status
+map<uint64_t,uint32_t> cacheline_stats_64; 	// used to store each cacheline encryption status
+uint64_t numCacheLinesWritten1_4=0;
+uint64_t numCacheLinesWritten1_8=0;
+uint64_t numCacheLinesWritten1_16=0;
+uint64_t numCacheLinesWritten1_32=0;
+uint64_t numCacheLinesWritten1_64=0;
+uint64_t num_epoch = 0;
+map<uint64_t,uint512_t> trailPAD;
+map<uint64_t,uint512_t> leadPAD;
+map<uint64_t,vector<bool>* > modified_words_flags;
+
+#define DEBUG
 
 DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     QoS::MemCtrl(p),
     port(name() + ".port", *this), isTimingMode(false),
     retryRdReq(false), retryWrReq(false),
+    XbarSendPacketEvent([this]{ processSendPacketEvent(); }, name()),
+    XbarFakeEvent([this]{ processFakeEvent(); }, name()),
     nextReqEvent([this]{ processNextReqEvent(); }, name()),
     respondEvent([this]{ processRespondEvent(); }, name()),
     deviceSize(p->device_size),
@@ -109,6 +168,39 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
     readQueue.resize(p->qos_priorities);
     writeQueue.resize(p->qos_priorities);
 
+    nvm = p->nvm;
+    enableEncryption = 0;
+    bitFlipsDelay = 0;
+    if(p->nvm) {
+    	nvm = p->nvm;
+    	nvm_write_buffer_size = p->nvm_write_buffer_size;
+        nvm_totalWriteBufferSize = 0;
+        nvm_wb_flushing = false;
+        nvm_wb_max_threshold = p->nvm_wb_max_flush_threshold;
+        nvm_wb_min_threshold = p->nvm_wb_min_flush_threshold;
+
+        enableEncryption = p->enable_encryption;
+        if(enableEncryption) {
+        	bitFlipsDelay = p->bit_flips_delay;
+        	if(bitFlipsDelay) {
+            	encryptionMethod = p->encryption_method;
+            	cout << "Encryption method: " << encryptionMethod << endl;
+        		deuce_epoch = p->deuce_epoch;
+        		cout << "NVM: " << nvm << " write buffer size: " << nvm_write_buffer_size << " wb max theshold: " << nvm_wb_max_threshold << " wb_min_threshold: " << nvm_wb_min_threshold <<
+        				" deuce epoch: " << deuce_epoch << endl;
+        	}
+        }
+    }
+        reram = p->reram;
+        if(reram) {
+        	dynamicRowReMapping = p->dynamic_row_remapping;
+        	cout << "NVM: " << nvm << " write buffer size: " << nvm_write_buffer_size << " wb max theshold: " << nvm_wb_max_threshold << " wb_min_threshold: " << nvm_wb_min_threshold <<
+        		" reram: " << reram << " dynamic_row_remapping" << dynamicRowReMapping << endl;
+
+        }
+    //}
+    cout << "tRCD: " << tRCD << " tWR: " << tWR << endl;
+
 
     for (int i = 0; i < ranksPerChannel; i++) {
         Rank* rank = new Rank(*this, p, i);
@@ -134,13 +226,13 @@ DRAMCtrl::DRAMCtrl(const DRAMCtrlParams* p) :
              "address range assigned (%d Mbytes)\n", deviceCapacity,
              capacity / (1024 * 1024));
 
-    DPRINTF(DRAM, "Memory capacity %lld (%lld) bytes\n", capacity,
-            AbstractMemory::size());
-
-    DPRINTF(DRAM, "Row buffer size %d bytes with %d columns per row buffer\n",
-            rowBufferSize, columnsPerRowBuffer);
+    //DPRINTF(DRAM, "Memory capacity %lld (%lld) bytes\n", capacity,
+    //        AbstractMemory::size());
 
     rowsPerBank = capacity / (rowBufferSize * banksPerRank * ranksPerChannel);
+
+    //DPRINTF(DRAM, "Row buffer size %d bytes with %d columns per row buffer. Rows per bank: %d\n",
+    //        rowBufferSize, columnsPerRowBuffer, rowsPerBank);
 
     // some basic sanity checks
     if (tREFI <= tRP || tREFI <= tRFC) {
@@ -243,6 +335,11 @@ DRAMCtrl::startup()
     // remember the memory system mode of operation
     isTimingMode = system()->isTimingMode();
 
+    //for(int i=0;i<=268436;i++){
+    //    counters.insert ( std::pair<int ,int>(i,0) );
+	//shadowPlus.insert(std::pair<int , bool>(i,false));
+    //}
+
     if (isTimingMode) {
         // timestamp offset should be in clock cycles for DRAMPower
         timeStampOffset = divCeil(curTick(), tCK);
@@ -258,13 +355,16 @@ DRAMCtrl::startup()
         // the next request, this will add an insignificant bubble at the
         // start of simulation
         nextBurstAt = curTick() + tRP + tRCD;
+        if(!XbarSendPacketEvent.scheduled()){
+        schedule(XbarSendPacketEvent, curTick()+1500);
+    }
     }
 }
 
 Tick
 DRAMCtrl::recvAtomic(PacketPtr pkt)
 {
-    DPRINTF(DRAM, "recvAtomic: %s 0x%x\n", pkt->cmdString(), pkt->getAddr());
+    ////DPRINTF(DRAM, "recvAtomic: %s 0x%x\n", pkt->cmdString(), pkt->getAddr());
 
     panic_if(pkt->cacheResponding(), "Should not see packets where cache "
              "is responding");
@@ -284,9 +384,9 @@ DRAMCtrl::recvAtomic(PacketPtr pkt)
 bool
 DRAMCtrl::readQueueFull(unsigned int neededEntries) const
 {
-    DPRINTF(DRAM, "Read queue limit %d, current size %d, entries needed %d\n",
-            readBufferSize, totalReadQueueSize + respQueue.size(),
-            neededEntries);
+    //DPRINTF(DRAM, "Read queue limit %d, current size %d, entries needed %d\n",
+    //        readBufferSize, totalReadQueueSize + respQueue.size(),
+    //        neededEntries);
 
     auto rdsize_new = totalReadQueueSize + respQueue.size() + neededEntries;
     return rdsize_new > readBufferSize;
@@ -295,8 +395,8 @@ DRAMCtrl::readQueueFull(unsigned int neededEntries) const
 bool
 DRAMCtrl::writeQueueFull(unsigned int neededEntries) const
 {
-    DPRINTF(DRAM, "Write queue limit %d, current size %d, entries needed %d\n",
-            writeBufferSize, totalWriteQueueSize, neededEntries);
+    //DPRINTF(DRAM, "Write queue limit %d, current size %d, entries needed %d\n",
+    //        writeBufferSize, totalWriteQueueSize, neededEntries);
 
     auto wrsize_new = (totalWriteQueueSize + neededEntries);
     return  wrsize_new > writeBufferSize;
@@ -397,8 +497,8 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     assert(row < rowsPerBank);
     assert(row < Bank::NO_ROW);
 
-    DPRINTF(DRAM, "Address: %lld Rank %d Bank %d Row %d\n",
-            dramPktAddr, rank, bank, row);
+    //DPRINTF(DRAM, "Address: %lld Rank %d Bank %d Row %d\n",
+    //        dramPktAddr, rank, bank, row);
 
     // create the corresponding DRAM packet with the entry time and
     // ready time set to the current tick, the latter will be updated
@@ -436,30 +536,30 @@ DRAMCtrl::addToReadQueue(PacketPtr pkt, unsigned int pktCount)
         // First check write buffer to see if the data is already at
         // the controller
         bool foundInWrQ = false;
-        Addr burst_addr = burstAlign(addr);
+        //Addr burst_addr = burstAlign(addr);
         // if the burst address is not present then there is no need
         // looking any further
-        if (isInWriteQueue.find(burst_addr) != isInWriteQueue.end()) {
-            for (const auto& vec : writeQueue) {
-                for (const auto& p : vec) {
+        //if (isInWriteQueue.find(burst_addr) != isInWriteQueue.end()) {
+        //    for (const auto& vec : writeQueue) {
+        //        for (const auto& p : vec) {
                     // check if the read is subsumed in the write queue
                     // packet we are looking at
-                    if (p->addr <= addr &&
-                       ((addr + size) <= (p->addr + p->size))) {
+        //            if (p->addr <= addr &&
+        //               ((addr + size) <= (p->addr + p->size))) {
 
-                        foundInWrQ = true;
-                        servicedByWrQ++;
-                        pktsServicedByWrQ++;
-                        DPRINTF(DRAM,
-                                "Read to addr %lld with size %d serviced by "
-                                "write queue\n",
-                                addr, size);
-                        bytesReadWrQ += burstSize;
-                        break;
-                    }
-                }
-            }
-        }
+        //                foundInWrQ = true;
+        //                servicedByWrQ++;
+        //                pktsServicedByWrQ++;
+        //                DPRINTF(DRAM,
+        //                        "Read to addr %lld with size %d serviced by "
+        //                        "write queue\n",
+        //                        addr, size);
+        //                bytesReadWrQ += burstSize;
+        //                break;
+        //            }
+        //        }
+        //    }
+        //}
 
         // If not found in the write q, make a DRAM packet and
         // push it onto the read queue
@@ -467,18 +567,20 @@ DRAMCtrl::addToReadQueue(PacketPtr pkt, unsigned int pktCount)
 
             // Make the burst helper for split packets
             if (pktCount > 1 && burst_helper == NULL) {
-                DPRINTF(DRAM, "Read to addr %lld translates to %d "
-                        "dram requests\n", pkt->getAddr(), pktCount);
+                //DPRINTF(DRAM, "Read to addr %lld translates to %d "
+                //        "dram requests\n", pkt->getAddr(), pktCount);
                 burst_helper = new BurstHelper(pktCount);
             }
 
             DRAMPacket* dram_pkt = decodeAddr(pkt, addr, size, true);
             dram_pkt->burstHelper = burst_helper;
+            DPRINTF(DRAM, "Read Request to addr %lld, rank/bank/row %d %d %d readQueue size: %d\n",
+                    dram_pkt->addr, dram_pkt->rank, dram_pkt->bank, dram_pkt->row, readQueue[dram_pkt->qosValue()].size());
 
             assert(!readQueueFull(1));
             rdQLenPdf[totalReadQueueSize + respQueue.size()]++;
 
-            DPRINTF(DRAM, "Adding to read queue\n");
+            //DPRINTF(DRAM, "Adding to read queue\n");
 
             readQueue[dram_pkt->qosValue()].push_back(dram_pkt);
 
@@ -509,7 +611,7 @@ DRAMCtrl::addToReadQueue(PacketPtr pkt, unsigned int pktCount)
     // If we are not already scheduled to get a request out of the
     // queue, do so now
     if (!nextReqEvent.scheduled()) {
-        DPRINTF(DRAM, "Request scheduled immediately\n");
+        //DPRINTF(DRAM, "Request scheduled immediately\n");
         schedule(nextReqEvent, curTick());
     }
 }
@@ -538,16 +640,19 @@ DRAMCtrl::addToWriteQueue(PacketPtr pkt, unsigned int pktCount)
 
         // if the item was not merged we need to create a new write
         // and enqueue it
-        if (!merged) {
+        if (!merged || 1) {
             DRAMPacket* dram_pkt = decodeAddr(pkt, addr, size, false);
+
+            dram_pkt->dly_due_to_bit_flips = pkt->dlyDueToBitFips;
 
             assert(totalWriteQueueSize < writeBufferSize);
             wrQLenPdf[totalWriteQueueSize]++;
 
-            DPRINTF(DRAM, "Adding to write queue\n");
-
             writeQueue[dram_pkt->qosValue()].push_back(dram_pkt);
             isInWriteQueue.insert(burstAlign(addr));
+
+            DPRINTF(DRAM, "Write Request to addr %lld, rank/bank/row %d %d %d writeQueueSize: %d\n",
+                    dram_pkt->addr, dram_pkt->rank, dram_pkt->bank, dram_pkt->row, isInWriteQueue.size());
 
             // log packet
             logRequest(MemCtrl::WRITE, pkt->masterId(), pkt->qosValue(),
@@ -582,7 +687,7 @@ DRAMCtrl::addToWriteQueue(PacketPtr pkt, unsigned int pktCount)
     // If we are not already scheduled to get a request out of the
     // queue, do so now
     if (!nextReqEvent.scheduled()) {
-        DPRINTF(DRAM, "Request scheduled immediately\n");
+        //DPRINTF(DRAM, "Request scheduled immediately\n");
         schedule(nextReqEvent, curTick());
     }
 }
@@ -591,33 +696,207 @@ void
 DRAMCtrl::printQs() const
 {
 #if TRACING_ON
-    DPRINTF(DRAM, "===READ QUEUE===\n\n");
-    for (const auto& queue : readQueue) {
-        for (const auto& packet : queue) {
-            DPRINTF(DRAM, "Read %lu\n", packet->addr);
-        }
-    }
+    //DPRINTF(DRAM, "===READ QUEUE===\n\n");
+    //for (const auto& queue : readQueue) {
+    //    for (const auto& packet : queue) {
+    //        //DPRINTF(DRAM, "Read %lu\n", packet->addr);
+    //    }
+    //}
 
-    DPRINTF(DRAM, "\n===RESP QUEUE===\n\n");
-    for (const auto& packet : respQueue) {
-        DPRINTF(DRAM, "Response %lu\n", packet->addr);
-    }
+    //DPRINTF(DRAM, "\n===RESP QUEUE===\n\n");
+    //for (const auto& packet : respQueue) {
+        //DPRINTF(DRAM, "Response %lu\n", packet->addr);
+    //}
 
-    DPRINTF(DRAM, "\n===WRITE QUEUE===\n\n");
-    for (const auto& queue : writeQueue) {
-        for (const auto& packet : queue) {
-            DPRINTF(DRAM, "Write %lu\n", packet->addr);
-        }
-    }
+    //DPRINTF(DRAM, "\n===WRITE QUEUE===\n\n");
+    //for (const auto& queue : writeQueue) {
+    //    for (const auto& packet : queue) {
+            //DPRINTF(DRAM, "Write %lu\n", packet->addr);
+    //    }
+    //}
 #endif // TRACING_ON
 }
 
-bool
-DRAMCtrl::recvTimingReq(PacketPtr pkt)
+void
+DRAMCtrl::processFakeEvent(){
+    //cout << "before calling fake" << endl;
+    if(XbarSendPacketEvent.scheduled())
+    deschedule(XbarSendPacketEvent);
+    schedule(XbarSendPacketEvent,curTick()+100);
+}
+
+
+void
+DRAMCtrl::processSendPacketEvent(){
+
+	uint64_t to_wait=1000;
+
+    //cout << "sending dummy " << endl;
+
+    if(!dummyPacketQ.empty()){
+        //cout << " sending " << dummyPacketQ.front()->getAddr();
+    	to_wait=dummyPacketQ.front()->payloadDelay;
+    	//if(dummyPacketQ.front()->isRead()) cout << " r " << endl;
+    	//else if(dummyPacketQ.front()->isWrite()) cout << " w " << endl;
+        //cout << " -- " << dummyPacketQ.front()->payloadDelay << endl;
+    	if(actualRcvTiming(dummyPacketQ.front())) {
+    		if((dummyPacketQ.front())->isWrite())
+    			DPRINTF(DRAM, "processSendPacketEvent: write queue size: %d\n", totalWriteQueueSize);
+    		dummyPacketQ.pop_front();
+    	}
+    	else
+    		if((dummyPacketQ.front())->isWrite())
+    			DPRINTF(DRAM, "processSendPacketEvent: write queue full: %d\n", totalWriteQueueSize);
+    }
+    //cout << " -- " << dummyPacketQ.front()->payloadDelay << endl;
+    if(XbarFakeEvent.scheduled())
+    	deschedule(XbarFakeEvent);
+	//cout << "next schedule at " << to_wait << " ticks" <<endl;
+    schedule(XbarFakeEvent,curTick()+to_wait+2000 );   
+
+
+}
+
+
+void 
+DRAMCtrl::sendDummyRead(){
+     //unsigned long long address =0;
+
+//cout << "event called : dummy read" << endl;
+
+    unsigned ofst = (64*(int)(random_mt.random(1, 10)));
+//AddrRange(pkt->getAddr(),pkt->getAddr() + (pkt->getSize() - 1)).isSubset(range)
+//cout << "sending dummy request "  << ofst <<  endl;   
+    PacketPtr dummy_pkt = nullptr;
+    
+    Request::Flags flags;
+
+    RequestPtr req = std::make_shared<Request>((unsigned long long int) 16*1024*1024*1024-ofst ,64, flags, Request::funcMasterId);
+    req->setContext(1);
+    dummy_pkt = new Packet(req, MemCmd::ReadReq);
+    dummy_pkt->dataDynamic(pkt_data_d);
+
+    //AddrRange addr_range = RangeSize(dummy_pkt->getAddr(), dummy_pkt->getSize());
+    //PortID master_port_id = findPort(addr_range);
+
+    //Tick old_header_delay = dummy_pkt->headerDelay;
+
+    // a request sees the frontend and forward latency
+    
+
+    // set the packet header and payload delay
+    
+
+    // determine how long to be crossbar layer is busy
+    // Tick packetFinishTime = clockEdge(Cycles(1)) + dummy_pkt->payloadDelay;
+
+    dummy_pkt->payloadDelay+=60000;
+    //dummy_pkt->payloadDelay+=10000000;
+
+    dummyPacketQ.push_back(dummy_pkt);
+    
+
+    //counter_read++;
+
+    //masterPorts[master_port_id]->sendTimingReq(dummy_pkt);
+
+
+    //recvTimingReq(pkt_data,slavePorts[1]);
+    //dummy_pkt->makeResponse();
+            
+    //unsigned size = dummy_pkt->getSize();
+    //unsigned offset = dummy_pkt->getAddr() & (burstSize - 1);
+    //unsigned int dram_pkt_count = divCeil(offset + size, burstSize);
+    //packet->dataDynamic(pkt_data);
+    //addToReadQueue(packet, dram_pkt_count);
+    //readReqs++;
+    //bytesReadSys += size;
+    //writeReqs++;
+    //bytesWrittenSys += size;
+
+    //port.schedTimingResp(dummy_pkt, curTick() + 100);
+
+/*if(!XbardummyReadEvent.scheduled()){
+    schedule(XbardummyReadEvent,curTick()+2000);
+}*/
+
+//schedule(XbarSendPacketEvent,curTick()+1000);
+
+    
+}
+
+void 
+DRAMCtrl::sendDummyWrite(){
+     //unsigned long long address =0;
+
+    //cout << "event called : dummy write--" << endl;
+
+    unsigned ofst = (64*(int)(random_mt.random(1, 10)));
+//AddrRange(pkt->getAddr(),pkt->getAddr() + (pkt->getSize() - 1)).isSubset(range)
+//cout << "sending dummy request "  << ofst <<  endl;   
+    PacketPtr dummy_pkt = nullptr;
+    
+    Request::Flags flags;
+
+    RequestPtr req = std::make_shared<Request>((unsigned long long int) 16*1024*1024*1024-ofst ,64, flags, Request::funcMasterId);
+    req->setContext(1);
+    dummy_pkt = new Packet(req, MemCmd::WritebackDirty);
+    dummy_pkt->dataDynamic(pkt_data_d);
+
+    //AddrRange addr_range = RangeSize(dummy_pkt->getAddr(), dummy_pkt->getSize());
+    //PortID master_port_id = findPort(addr_range);
+
+    //Tick old_header_delay = dummy_pkt->headerDelay;
+
+    // a request sees the frontend and forward latency
+    //Tick xbar_delay = (frontendLatency + forwardLatency) * clockPeriod();
+
+    // set the packet header and payload delay
+    //calcPacketTiming(dummy_pkt, xbar_delay);
+
+    // determine how long to be crossbar layer is busy
+    // Tick packetFinishTime = clockEdge(Cycles(1)) + dummy_pkt->payloadDelay;
+
+    dummy_pkt->payloadDelay+=150000;
+    //dummy_pkt->payloadDelay+=10000000;
+
+    dummyPacketQ.push_back(dummy_pkt);
+    //portQueue.push_back(portId);
+    //counter_write++;
+
+    //masterPorts[master_port_id]->sendTimingReq(dummy_pkt);
+
+
+    //recvTimingReq(pkt_data,slavePorts[1]);
+    //dummy_pkt->makeResponse();
+            
+    //unsigned size = dummy_pkt->getSize();
+    //unsigned offset = dummy_pkt->getAddr() & (burstSize - 1);
+    //unsigned int dram_pkt_count = divCeil(offset + size, burstSize);
+    //packet->dataDynamic(pkt_data);
+    //addToReadQueue(packet, dram_pkt_count);
+    //readReqs++;
+    //bytesReadSys += size;
+    //writeReqs++;
+    //bytesWrittenSys += size;
+
+    //port.schedTimingResp(dummy_pkt, curTick() + 100);
+
+/*
+if(!XbardummyWriteEvent.scheduled()){
+    schedule(XbardummyWriteEvent,curTick()+2000);
+}*/
+
+//schedule(XbarSendPacketEvent,curTick()+1010);
+    
+}
+
+bool 
+DRAMCtrl::actualRcvTiming(PacketPtr pkt)
 {
-    // This is where we enter from the outside world
-    DPRINTF(DRAM, "recvTimingReq: request %s addr %lld size %d\n",
-            pkt->cmdString(), pkt->getAddr(), pkt->getSize());
+
+    //DPRINTF(DRAM, "recvTimingReq: request %s addr %lld size %d\n",
+    //        pkt->cmdString(), pkt->getAddr(), pkt->getSize());
 
     panic_if(pkt->cacheResponding(), "Should not see packets where cache "
              "is responding");
@@ -643,11 +922,15 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
     // run the QoS scheduler and assign a QoS priority value to the packet
     qosSchedule( { &readQueue, &writeQueue }, burstSize, pkt);
 
+    //cout << pkt->getAddr() << endl;
+
+    
+
     // check local buffers and do not accept if full
     if (pkt->isRead()) {
         assert(size != 0);
         if (readQueueFull(dram_pkt_count)) {
-            DPRINTF(DRAM, "Read queue full, not accepting\n");
+            //DPRINTF(DRAM, "Read queue full, not accepting\n");
             // remember that we have to retry this port
             retryRdReq = true;
             numRdRetry++;
@@ -661,7 +944,7 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
         assert(pkt->isWrite());
         assert(size != 0);
         if (writeQueueFull(dram_pkt_count)) {
-            DPRINTF(DRAM, "Write queue full, not accepting\n");
+            //DPRINTF(DRAM, "Write queue full, not accepting\n");
             // remember that we have to retry this port
             retryWrReq = true;
             numWrRetry++;
@@ -676,75 +959,212 @@ DRAMCtrl::recvTimingReq(PacketPtr pkt)
     return true;
 }
 
+
+bool
+DRAMCtrl::recvTimingReq(PacketPtr pkt)
+{
+
+	//actualRcvTiming(pkt,slave_port_id);
+
+	uint64_t evicted = 0xffffffffff;
+
+	//// counter cache part
+	if(pkt->isRead()){
+		DPRINTF(DRAM, "recvTimingReq: read: %s\n",pkt->getBlockAddr(64));
+		if(enableEncryption)
+		{
+			if(cc->hasCounter(pkt->getAddr())){
+				hit_count++;
+			}
+			else{
+				miss_count++;
+				sendDummyRead();										// read a packet to memory to get the counter value
+				evicted = cc->PushInCache(pkt->getAddr(),'w');			// replace the received counter with the existing counter in the counter cache
+				if(evicted!=0xffffffffff){
+					sendDummyWrite();
+				}
+				else{
+				}
+			}
+
+			// receive the counter value. Perform actual decryption
+
+			//pkt->clearModifiedWordsFlag();
+
+			if(bitFlipsDelay) {
+				if(modified_words_flags.find(pkt->getBlockAddr(64)) == modified_words_flags.end())
+				{
+					modified_words_flags[pkt->getBlockAddr(64)] = new vector<bool>;
+					for(int i=0; i<32; i++)
+						modified_words_flags[pkt->getBlockAddr(64)]->push_back(0);
+				}
+
+				for(int i=0; i<32; i++) {
+					pkt->modifiedWordsFlag[i] = 0; //(*(modified_words_flags[pkt->getBlockAddr(64)]))[i];
+				}
+			}
+		}
+		pkt->payloadDelay+=60000;		// add delay for reading
+	}
+	else if(pkt->isWrite()){
+		DPRINTF(DRAM, "recvTimingReq: write: %s\n",pkt->getBlockAddr(64));
+		/*if(enableEncryption)
+		{
+			//sendDummyWrite();
+			if(cc->hasCounter(pkt->getAddr())){
+				hit_count++;
+				//cout << "cache hit while writing" << endl;
+			}
+			else{
+				//cout << "miss while writing-- fetching from memory" << endl;
+				miss_count++;
+				sendDummyRead();
+				evicted = cc->PushInCache(pkt->getAddr(),'w');
+				if(evicted!=0xffffffffff){
+					sendDummyWrite();
+				}
+				else{
+				}
+			}
+
+			//DPRINTF(DRAM, "recvTimingReq: write: %s\n",pkt->getBlockAddr(64));
+
+			if(bitFlipsDelay) {
+				if(encryptionMethod == 10) sendDummyRead();
+
+				//if(encryptionMethod == 12 || encryptionMethod == 13) {
+				if(!getDelayDueToBitFlips(pkt)) {
+					llcMissrate += 1;
+					accessAndRespond(pkt, frontendLatency);
+
+					// If we are not already scheduled to get a request out of the
+					// queue, do so now
+					if (!nextReqEvent.scheduled()) {
+						//DPRINTF(DRAM, "Request scheduled immediately\n");
+						schedule(nextReqEvent, curTick());
+					}
+					return true;
+				}
+			}
+		}*/
+		//pkt->payloadDelay+=150000;
+	}
+
+	//cout << "CacheMissRate " << (int)((float)miss_count/(float)(hit_count+miss_count)*100.0) << endl;
+
+	llcMissrate += 1;
+
+
+	dummyPacketQ.push_back(pkt);
+
+    return true;
+
+}
+
 void
 DRAMCtrl::processRespondEvent()
 {
-    DPRINTF(DRAM,
-            "processRespondEvent(): Some req has reached its readyTime\n");
+    //DPRINTF(DRAM,
+    //        "processRespondEvent(): Some req has reached its readyTime\n");
 
     DRAMPacket* dram_pkt = respQueue.front();
 
-    // if a read has reached its ready-time, decrement the number of reads
-    // At this point the packet has been handled and there is a possibility
-    // to switch to low-power mode if no other packet is available
-    --dram_pkt->rankRef.readEntries;
-    DPRINTF(DRAM, "number of read entries for rank %d is %d\n",
-            dram_pkt->rank, dram_pkt->rankRef.readEntries);
+    DPRINTF(DRAM,
+            "processRespondEvent(): req: %lu has reached its readyTime at: %d\n",dram_pkt->addr, (dram_pkt->readyTime - dram_pkt->entryTime) );
 
-    // counter should at least indicate one outstanding request
-    // for this read
-    assert(dram_pkt->rankRef.outstandingEvents > 0);
-    // read response received, decrement count
-    --dram_pkt->rankRef.outstandingEvents;
+    //if(reram && dram_pkt->isWrite())
+    //{
+		//removed write from queue, decrement count
+	//	--dram_pkt->rankRef.writeEntries;
 
-    // at this moment should not have transitioned to a low-power state
-    assert((dram_pkt->rankRef.pwrState != PWR_SREF) &&
-           (dram_pkt->rankRef.pwrState != PWR_PRE_PDN) &&
-           (dram_pkt->rankRef.pwrState != PWR_ACT_PDN));
+		//if (!dram_pkt->rankRef.writeDoneEvent.scheduled()) {
+		//	schedule(dram_pkt->rankRef.writeDoneEvent, dram_pkt->readyTime);
+			// New event, increment count
+		//++dram_pkt->rankRef.outstandingEvents;
 
-    // track if this is the last packet before idling
-    // and that there are no outstanding commands to this rank
-    if (dram_pkt->rankRef.isQueueEmpty() &&
-        dram_pkt->rankRef.outstandingEvents == 0) {
-        // verify that there are no events scheduled
-        assert(!dram_pkt->rankRef.activateEvent.scheduled());
-        assert(!dram_pkt->rankRef.prechargeEvent.scheduled());
+		//} else if (dram_pkt->rankRef.writeDoneEvent.when() <
+		//		   dram_pkt->readyTime) {
 
-        // if coming from active state, schedule power event to
-        // active power-down else go to precharge power-down
-        DPRINTF(DRAMState, "Rank %d sleep at tick %d; current power state is "
-                "%d\n", dram_pkt->rank, curTick(), dram_pkt->rankRef.pwrState);
+		//	reschedule(dram_pkt->rankRef.writeDoneEvent, dram_pkt->readyTime);
+		//}
 
-        // default to ACT power-down unless already in IDLE state
-        // could be in IDLE if PRE issued before data returned
-        PowerState next_pwr_state = PWR_ACT_PDN;
-        if (dram_pkt->rankRef.pwrState == PWR_IDLE) {
-            next_pwr_state = PWR_PRE_PDN;
-        }
+	    //assert(dram_pkt->rankRef.outstandingEvents > 0);
+	    // read response received, decrement count
+	    //--dram_pkt->rankRef.outstandingEvents;
 
-        dram_pkt->rankRef.powerDownSleep(next_pwr_state, curTick());
-    }
+	    //accessAndRespond(dram_pkt->pkt, frontendLatency + backendLatency);
 
-    if (dram_pkt->burstHelper) {
-        // it is a split packet
-        dram_pkt->burstHelper->burstsServiced++;
-        if (dram_pkt->burstHelper->burstsServiced ==
-            dram_pkt->burstHelper->burstCount) {
-            // we have now serviced all children packets of a system packet
-            // so we can now respond to the requester
-            // @todo we probably want to have a different front end and back
-            // end latency for split packets
-            accessAndRespond(dram_pkt->pkt, frontendLatency + backendLatency);
-            delete dram_pkt->burstHelper;
-            dram_pkt->burstHelper = NULL;
-        }
-    } else {
-        // it is not a split packet
-        accessAndRespond(dram_pkt->pkt, frontendLatency + backendLatency);
-    }
+    //}
+    //else
+    //{
+		// if a read has reached its ready-time, decrement the number of reads
+		// At this point the packet has been handled and there is a possibility
+		// to switch to low-power mode if no other packet is available
+		--dram_pkt->rankRef.readEntries;
+		//DPRINTF(DRAM, "number of read entries for rank %d is %d\n",
+		//        dram_pkt->rank, dram_pkt->rankRef.readEntries);
+    //}
+	// counter should at least indicate one outstanding request
+	// for this read
+	assert(dram_pkt->rankRef.outstandingEvents > 0);
+	// read response received, decrement count
+	--dram_pkt->rankRef.outstandingEvents;
 
-    delete respQueue.front();
-    respQueue.pop_front();
+	// at this moment should not have transitioned to a low-power state
+	assert((dram_pkt->rankRef.pwrState != PWR_SREF) &&
+		   (dram_pkt->rankRef.pwrState != PWR_PRE_PDN) &&
+		   (dram_pkt->rankRef.pwrState != PWR_ACT_PDN));
+
+	// track if this is the last packet before idling
+	// and that there are no outstanding commands to this rank
+	if (dram_pkt->rankRef.isQueueEmpty() &&
+		dram_pkt->rankRef.outstandingEvents == 0) {
+		// verify that there are no events scheduled
+		assert(!dram_pkt->rankRef.activateEvent.scheduled());
+		assert(!dram_pkt->rankRef.prechargeEvent.scheduled());
+
+		// if coming from active state, schedule power event to
+		// active power-down else go to precharge power-down
+		DPRINTF(DRAMState, "Rank %d sleep at tick %d; current power state is "
+				"%d\n", dram_pkt->rank, curTick(), dram_pkt->rankRef.pwrState);
+
+		// default to ACT power-down unless already in IDLE state
+		// could be in IDLE if PRE issued before data returned
+		PowerState next_pwr_state = PWR_ACT_PDN;
+		if (dram_pkt->rankRef.pwrState == PWR_IDLE) {
+			next_pwr_state = PWR_PRE_PDN;
+		}
+
+		dram_pkt->rankRef.powerDownSleep(next_pwr_state, curTick());
+	}
+
+	//if((!reram) && dram_pkt->isRead())
+	//{
+		if (dram_pkt->burstHelper) {
+			// it is a split packet
+			dram_pkt->burstHelper->burstsServiced++;
+			if (dram_pkt->burstHelper->burstsServiced ==
+				dram_pkt->burstHelper->burstCount) {
+				// we have now serviced all children packets of a system packet
+				// so we can now respond to the requester
+				// @todo we probably want to have a different front end and back
+				// end latency for split packets
+				accessAndRespond(dram_pkt->pkt, frontendLatency + backendLatency);
+				delete dram_pkt->burstHelper;
+				dram_pkt->burstHelper = NULL;
+			}
+		} else {
+			// it is not a split packet
+			accessAndRespond(dram_pkt->pkt, frontendLatency + backendLatency);
+		}
+	//}
+	////else{
+	//	DPRINTF(DRAMState, "response addr: %lu at %d", curTick());
+	//	accessAndRespond(dram_pkt->pkt, frontendLatency + backendLatency);
+	//}
+
+	delete respQueue.front();
+	respQueue.pop_front();
 
     if (!respQueue.empty()) {
         assert(respQueue.front()->readyTime >= curTick());
@@ -781,9 +1201,9 @@ DRAMCtrl::chooseNext(DRAMPacketQueue& queue, Tick extra_col_delay)
             DRAMPacket* dram_pkt = *(queue.begin());
             if (ranks[dram_pkt->rank]->inRefIdleState()) {
                 ret = queue.begin();
-                DPRINTF(DRAM, "Single request, going to a free rank\n");
+                //DPRINTF(DRAM, "Single request, going to a free rank\n");
             } else {
-                DPRINTF(DRAM, "Single request, going to a busy rank\n");
+                //DPRINTF(DRAM, "Single request, going to a busy rank\n");
             }
         } else if (memSchedPolicy == Enums::fcfs) {
             // check if there is a packet going to a free rank
@@ -840,16 +1260,16 @@ DRAMCtrl::chooseNextFRFCFS(DRAMPacketQueue& queue, Tick extra_col_delay)
         const Tick col_allowed_at = dram_pkt->isRead() ? bank.rdAllowedAt :
                                                          bank.wrAllowedAt;
 
-        DPRINTF(DRAM, "%s checking packet in bank %d\n",
-                __func__, dram_pkt->bankRef.bank);
+        //DPRINTF(DRAM, "%s checking packet in bank %d\n",
+        //        __func__, dram_pkt->bankRef.bank);
 
         // check if rank is not doing a refresh and thus is available, if not,
         // jump to the next packet
         if (dram_pkt->rankRef.inRefIdleState()) {
 
-            DPRINTF(DRAM,
-                    "%s bank %d - Rank %d available\n", __func__,
-                    dram_pkt->bankRef.bank, dram_pkt->rankRef.rank);
+            //DPRINTF(DRAM,
+            //        "%s bank %d - Rank %d available\n", __func__,
+            //        dram_pkt->bankRef.bank, dram_pkt->rankRef.rank);
 
             // check if it is a row hit
             if (bank.openRow == dram_pkt->row) {
@@ -861,7 +1281,7 @@ DRAMCtrl::chooseNextFRFCFS(DRAMPacketQueue& queue, Tick extra_col_delay)
                     // commands that can issue seamlessly, without
                     // additional delay, such as same rank accesses
                     // and/or different bank-group accesses
-                    DPRINTF(DRAM, "%s Seamless row buffer hit\n", __func__);
+                    //DPRINTF(DRAM, "%s Seamless row buffer hit\n", __func__);
                     selected_pkt_it = i;
                     // no need to look through the remaining queue entries
                     break;
@@ -872,7 +1292,7 @@ DRAMCtrl::chooseNextFRFCFS(DRAMPacketQueue& queue, Tick extra_col_delay)
                     // the current one
                     selected_pkt_it = i;
                     found_prepped_pkt = true;
-                    DPRINTF(DRAM, "%s Prepped row buffer hit\n", __func__);
+                    //DPRINTF(DRAM, "%s Prepped row buffer hit\n", __func__);
                 }
             } else if (!found_earliest_pkt) {
                 // if we have not initialised the bank status, do it
@@ -901,13 +1321,13 @@ DRAMCtrl::chooseNextFRFCFS(DRAMPacketQueue& queue, Tick extra_col_delay)
                 }
             }
         } else {
-            DPRINTF(DRAM, "%s bank %d - Rank %d not available\n", __func__,
-                    dram_pkt->bankRef.bank, dram_pkt->rankRef.rank);
+            //DPRINTF(DRAM, "%s bank %d - Rank %d not available\n", __func__,
+            //        dram_pkt->bankRef.bank, dram_pkt->rankRef.rank);
         }
     }
 
     if (selected_pkt_it == queue.end()) {
-        DPRINTF(DRAM, "%s no available ranks found\n", __func__);
+        //DPRINTF(DRAM, "%s no available ranks found\n", __func__);
     }
 
     return selected_pkt_it;
@@ -916,13 +1336,16 @@ DRAMCtrl::chooseNextFRFCFS(DRAMPacketQueue& queue, Tick extra_col_delay)
 void
 DRAMCtrl::accessAndRespond(PacketPtr pkt, Tick static_latency)
 {
-    DPRINTF(DRAM, "Responding to Address %lld.. ",pkt->getAddr());
+    //DPRINTF(DRAM, "Responding to Address %lld.. ",pkt->getAddr());
 
     bool needsResponse = pkt->needsResponse();
     // do the actual memory access which also turns the packet into a
     // response
     access(pkt);
-
+    //if(pkt->isWrite()) {
+    //	DPRINTF(DRAM, " Needs response %d.. ",needsResponse);
+    //	needsResponse = 0;
+    //}
     // turn packet around to go back to requester if response expected
     if (needsResponse) {
         // access already turned the packet into a response
@@ -935,6 +1358,16 @@ DRAMCtrl::accessAndRespond(PacketPtr pkt, Tick static_latency)
                              pkt->payloadDelay;
         // Here we reset the timing of the packet before sending it out.
         pkt->headerDelay = pkt->payloadDelay = 0;
+
+		if(modified_words_flags.find(pkt->getBlockAddr(64)) == modified_words_flags.end())
+		{
+			modified_words_flags[pkt->getBlockAddr(64)] = new vector<bool>;
+			for(int i=0; i<32; i++)
+				modified_words_flags[pkt->getBlockAddr(64)]->push_back(0);
+		}
+
+		for(int i=0; i<32; i++)
+			pkt->modifiedWordsFlag[i] = 0; //(*(modified_words_flags[pkt->getBlockAddr(64)]))[i];
 
         // queue the packet in the response queue to be sent out after
         // the static latency has passed
@@ -956,7 +1389,7 @@ DRAMCtrl::activateBank(Rank& rank_ref, Bank& bank_ref,
 {
     assert(rank_ref.actTicks.size() == activationLimit);
 
-    DPRINTF(DRAM, "Activate at tick %d\n", act_tick);
+    //DPRINTF(DRAM, "Activate at tick %d\n", act_tick);
 
     // update the open row
     assert(bank_ref.openRow == Bank::NO_ROW);
@@ -971,9 +1404,9 @@ DRAMCtrl::activateBank(Rank& rank_ref, Bank& bank_ref,
     ++rank_ref.numBanksActive;
     assert(rank_ref.numBanksActive <= banksPerRank);
 
-    DPRINTF(DRAM, "Activate bank %d, rank %d at tick %lld, now got %d active\n",
-            bank_ref.bank, rank_ref.rank, act_tick,
-            ranks[rank_ref.rank]->numBanksActive);
+    //DPRINTF(DRAM, "Activate bank %d, rank %d at tick %lld, now got %d active\n",
+    //        bank_ref.bank, rank_ref.rank, act_tick,
+    //        ranks[rank_ref.rank]->numBanksActive);
 
     rank_ref.cmdList.push_back(Command(MemCommand::ACT, bank_ref.bank,
                                act_tick));
@@ -1031,9 +1464,9 @@ DRAMCtrl::activateBank(Rank& rank_ref, Bank& bank_ref,
         // oldest in our window of X
         if (rank_ref.actTicks.back() &&
            (act_tick - rank_ref.actTicks.back()) < tXAW) {
-            DPRINTF(DRAM, "Enforcing tXAW with X = %d, next activate "
-                    "no earlier than %llu\n", activationLimit,
-                    rank_ref.actTicks.back() + tXAW);
+            //DPRINTF(DRAM, "Enforcing tXAW with X = %d, next activate "
+            //        "no earlier than %llu\n", activationLimit,
+            //        rank_ref.actTicks.back() + tXAW);
             for (int j = 0; j < banksPerRank; j++)
                 // next activate must not happen before end of window
                 rank_ref.banks[j].actAllowedAt =
@@ -1073,9 +1506,9 @@ DRAMCtrl::prechargeBank(Rank& rank_ref, Bank& bank, Tick pre_at, bool trace)
     assert(rank_ref.numBanksActive != 0);
     --rank_ref.numBanksActive;
 
-    DPRINTF(DRAM, "Precharging bank %d, rank %d at tick %lld, now got "
-            "%d active\n", bank.bank, rank_ref.rank, pre_at,
-            rank_ref.numBanksActive);
+    //DPRINTF(DRAM, "Precharging bank %d, rank %d at tick %lld, now got "
+    //        "%d active\n", bank.bank, rank_ref.rank, pre_at,
+    //        rank_ref.numBanksActive);
 
     if (trace) {
 
@@ -1099,11 +1532,1280 @@ DRAMCtrl::prechargeBank(Rank& rank_ref, Bank& bank, Tick pre_at, bool trace)
     }
 }
 
+Tick
+DRAMCtrl::getDelayDueToBitFlips(PacketPtr pkt)
+{
+	//PacketPtr pkt = dram_pkt->pkt;
+	Tick delay = tWR;
+
+	uint512_t encrypted_data;
+	std::vector<uint8_t> actual_data_bytes(pkt->getSize());
+	std::vector<uint8_t> stored_data_bytes(pkt->getSize());
+	std::vector<uint8_t> updated_data_bytes(pkt->getSize());
+	uint512_t actual_data=0, stored_data=0, updated_data=0;
+
+	getMemoryData(pkt, &actual_data_bytes[0], &stored_data_bytes[0]);
+	pkt->writeData(&updated_data_bytes[0]);
+
+	if(modified_words_flags.find(pkt->getBlockAddr(64)) == modified_words_flags.end())
+	{
+		modified_words_flags[pkt->getBlockAddr(64)] = new vector<bool>;
+		for(int i=0; i<32; i++) modified_words_flags[pkt->getBlockAddr(64)]->push_back(0);
+	}
+	for(int i=0; i<32; i++) {
+		bool temp = (*(modified_words_flags[pkt->getBlockAddr(64)]))[i];
+		(*(modified_words_flags[pkt->getBlockAddr(64)]))[i] = temp | pkt->modifiedWordsFlag[i];
+	}
+
+	if(pkt->hasData())
+	{
+		for (int i=0; i<pkt->getSize(); i++) {
+			actual_data = actual_data<<8 | actual_data_bytes[i];
+			stored_data = stored_data<<8 | stored_data_bytes[(pkt->getSize())-1 - i];
+			updated_data = updated_data<<8 | updated_data_bytes[i];
+		}
+	}
+	uint512_t compData = (actual_data) ^ (updated_data);
+	if(compData == 0) {writesWithOutWordChanges += 1;}//pkt->dlyDueToBitFips = 0;return true;}
+
+	totalCacheLineWrites += 1;
+	int wordsModifiedThisWrite = 0;
+	int wordsModifiedThisWriteIndex = 0;
+	for(int i=0; i<32; i++) { if(pkt->modifiedWordsFlag[i]) { totalModifiedWords += 1; wordsModifiedThisWrite++; wordsModifiedThisWriteIndex = i;}}
+	if(!wordsModifiedThisWrite) { actualWritesWithOutWordChanges += 1; pkt->dlyDueToBitFips = 0;return false; }
+
+	// received the counter value. Update it and encrypt the data and send the updated counter to the cache.
+	switch(encryptionMethod) {
+	case 0: {
+		//DCW No Encryption
+		encrypted_data = updated_data;
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		uint512_t x = (stored_data) ^ (encrypted_data);
+		unsigned bit_flips = 0;
+		while (x > 0) {	bit_flips = bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; }
+		bitFlips += bit_flips;
+		int write_slots = 1 + (bit_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		numWriteReqs++;
+	}
+		break;
+
+	case 1: {
+		//DCW With Encryption
+		uint512_t PAD = gen512(); //rand_value(gen); //counter ^ AES;
+		encrypted_data = PAD ^ (updated_data);
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		uint512_t x = (stored_data) ^ (encrypted_data);
+		unsigned bit_flips = 0;
+		while (x > 0) {	bit_flips = bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; }
+		bitFlips += bit_flips;
+		int write_slots = 1 +(bit_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		numWriteReqs++;
+	}
+		break;
+
+	case 2: {
+		//FNW No Encryption
+		encrypted_data = updated_data;
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		uint512_t x = (stored_data) ^ (encrypted_data);
+		unsigned bit_flips = 0;
+		while (x > 0) {	bit_flips = bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; }
+		if(bit_flips > 512/2)
+			bit_flips = 512-bit_flips;
+
+		bitFlips += bit_flips;
+		int write_slots = 1 + (bit_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		numWriteReqs++;
+	}
+		break;
+
+	case 3: {
+		//FNW with Encryption
+		uint512_t PAD = gen512(); //rand_value(gen); //counter ^ AES;
+		encrypted_data = PAD ^ (updated_data);
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		uint512_t x = (stored_data) ^ (encrypted_data);
+		unsigned bit_flips = 0;
+		while (x > 0) {	bit_flips = bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; }
+		if(bit_flips > 512/2)
+			bit_flips = 512-bit_flips;
+
+		bitFlips += bit_flips;
+		int write_slots = 1 + (bit_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		numWriteReqs++;
+	}
+		break;
+
+	case 4: {
+		//TSECME
+		unsigned bit_flips = 0;
+		unsigned best_flips = 0;
+		int best_flips_index = 0;
+		uint512_t best_flips_encrypted_data = 0;
+		int counter = 0;
+		uint512_t PAD;
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+
+		while(counter < 16) {
+			counter++;
+			bit_flips = 0;
+			PAD = gen512();
+
+			// PAD = PAD << (512-modified_words*16); //2 bytes(16bits per word)
+			encrypted_data = PAD ^ (updated_data);
+
+			uint512_t x = (stored_data) ^ (encrypted_data);
+			while (x > 0) {	bit_flips = bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+			if (best_flips == 0) {
+				best_flips =  bit_flips;
+				best_flips_encrypted_data = encrypted_data;
+				best_flips_index = counter;
+			}
+			else {
+				best_flips = (best_flips < bit_flips) ? best_flips : bit_flips;
+				best_flips_encrypted_data = (best_flips < bit_flips) ? best_flips_encrypted_data : encrypted_data;
+				best_flips_index = (best_flips < bit_flips) ? best_flips_index : counter;
+			}
+		}
+
+		encrypted_data = best_flips_encrypted_data;
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		totalEncryptValSkpd += best_flips_index;
+		totalEncryptValTested += counter;
+		bitFlips += best_flips;
+		int write_slots = 1 + (best_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		pkt->payloadDelay += 25000;
+		numWriteReqs++;
+	}
+		break;
+
+	case 5: {
+
+		int counter = 0;
+		uint512_t bestPAD = 0;
+		uint512_t PAD;
+		int pad_hamming_distance = 0;
+		int best_pad_hamming_distance = 0;
+		int best_pad_index = 0;
+		int best_data_bit_flips = 0;
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			trailPAD[cacheline] = leadPAD[cacheline] = gen512();
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+
+		while(counter < 16) {
+			counter++;
+			pad_hamming_distance = 0;
+			PAD = gen512();
+
+			uint512_t x = (trailPAD[cacheline]) ^ (PAD);
+			while (x > 0) {	pad_hamming_distance = pad_hamming_distance + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+			if (best_pad_hamming_distance == 0) {
+				bestPAD = PAD;
+				best_pad_index = counter;
+				best_pad_hamming_distance = pad_hamming_distance;
+			}
+			else {
+				bestPAD = (best_pad_hamming_distance < pad_hamming_distance) ? bestPAD : PAD;
+				best_pad_index = (best_pad_hamming_distance < pad_hamming_distance) ? best_pad_index : counter;
+				best_pad_hamming_distance = (best_pad_hamming_distance < pad_hamming_distance) ? best_pad_hamming_distance : pad_hamming_distance;
+			}
+		}
+
+		trailPAD[cacheline] = bestPAD;
+		encrypted_data = bestPAD ^ updated_data;
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		best_data_bit_flips = 0;
+		uint512_t x = stored_data ^ encrypted_data;
+		while (x > 0) {	best_data_bit_flips = best_data_bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+		totalEncryptValSkpd += best_pad_index;
+		totalEncryptValTested += counter;
+		bitFlips += best_data_bit_flips;
+		int write_slots = 1 + (best_data_bit_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		pkt->payloadDelay += 25000;
+		numWriteReqs++;
+	}
+		break;
+
+	case 6: {
+
+		uint128_t best_PAD[4] = {0};
+		uint128_t trail_PAD[4] = {0};
+		int best_pad_hamming_distance[4] = {0};
+		int best_pad_index[4] = {0};
+		int best_data_bit_flips = {0};
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			trailPAD[cacheline] = leadPAD[cacheline] = gen512();
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+
+		for (int i=0; i<4; i++) {
+			trail_PAD[i] = (uint128_t)(trailPAD[cacheline] >> 128*i);
+
+			int counter = 0;
+			while(counter < 16) {
+				counter++;
+				uint128_t PAD;
+
+				int pad_hamming_distance = 0;
+				PAD = gen128();
+
+				uint128_t x = (trail_PAD[i]) ^ (PAD);
+				while (x > 0) {	pad_hamming_distance = pad_hamming_distance + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+				if (best_pad_hamming_distance[i] == 0) {
+					best_PAD[i] = PAD;
+					best_pad_index[i] = counter;
+					best_pad_hamming_distance[i] = pad_hamming_distance;
+				}
+				else {
+					best_PAD[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_PAD[i] : PAD;
+					best_pad_index[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_pad_index[i] : counter;
+					best_pad_hamming_distance[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_pad_hamming_distance[i] : pad_hamming_distance;
+				}
+
+				std::cout << " subPAD: " << i << " phd: " << pad_hamming_distance;
+			}
+
+			std::cout << " subPAD: " << i << " bphd: " << best_pad_hamming_distance[i];
+		}
+		std::cout << "" << endl;
+
+		for (int i=0; i<4; i++) {
+			trailPAD[cacheline] = (trailPAD[cacheline] << 128) | best_PAD[4-i-1];
+		}
+
+		encrypted_data = trailPAD[cacheline] ^ updated_data;
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		best_data_bit_flips = 0;
+		uint512_t x = stored_data ^ encrypted_data;
+		while (x > 0) {	best_data_bit_flips = best_data_bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+		//totalEncryptValSkpd += best_pad_index;
+		//totalEncryptValTested += counter;
+		bitFlips += best_data_bit_flips;
+		int write_slots = 1 + (best_data_bit_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		pkt->payloadDelay += 25000;
+		numWriteReqs++;
+	}
+		break;
+
+	case 7: {
+
+		uint64_t best_PAD[8] = {0};
+		uint64_t trail_PAD[8] = {0};
+		int best_pad_hamming_distance[8] = {0};
+		int best_pad_index[8] = {0};
+		int best_data_bit_flips = {0};
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			trailPAD[cacheline] = leadPAD[cacheline] = gen512();
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+
+		for (int i=0; i<8; i++) {
+			trail_PAD[i] = (uint64_t)(trailPAD[cacheline] >> 64*i);
+
+			int counter = 0;
+			while(counter < 16) {
+				counter++;
+				uint64_t PAD[8];
+
+				int pad_hamming_distance = 0;
+				PAD[i] = gen64();
+
+				uint64_t x = (trail_PAD[i]) ^ (PAD[i]);
+				while (x > 0) {	pad_hamming_distance = pad_hamming_distance + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+				if (best_pad_hamming_distance[i] == 0) {
+					best_PAD[i] = PAD[i];
+					best_pad_index[i] = counter;
+					best_pad_hamming_distance[i] = pad_hamming_distance;
+				}
+				else {
+					best_PAD[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_PAD[i] : PAD[i];
+					best_pad_index[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_pad_index[i] : counter;
+					best_pad_hamming_distance[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_pad_hamming_distance[i] : pad_hamming_distance;
+				}
+			}
+		}
+
+		for (int i=0; i<8; i++) {
+			trailPAD[cacheline] = (trailPAD[cacheline] << 64) | best_PAD[8-i-1];
+		}
+
+		encrypted_data = trailPAD[cacheline] ^ updated_data;
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		best_data_bit_flips = 0;
+		uint512_t x = stored_data ^ encrypted_data;
+		while (x > 0) {	best_data_bit_flips = best_data_bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+		//totalEncryptValSkpd += best_pad_index;
+		//totalEncryptValTested += counter;
+		bitFlips += best_data_bit_flips;
+		int write_slots = 1 + (best_data_bit_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		pkt->payloadDelay += 25000;
+		numWriteReqs++;
+	}
+		break;
+
+	case 8: {
+
+		uint32_t best_PAD[16] = {0};
+		uint32_t trail_PAD[16] = {0};
+		int best_pad_hamming_distance[16] = {0};
+		int best_pad_index[16] = {0};
+		int best_data_bit_flips = {0};
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			trailPAD[cacheline] = leadPAD[cacheline] = gen512();
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+
+		for (int i=0; i<16; i++) {
+			trail_PAD[i] = (uint32_t)(trailPAD[cacheline] >> 32*i);
+
+			int counter = 0;
+			while(counter < 16) {
+				counter++;
+				uint32_t PAD[16];
+
+				int pad_hamming_distance = 0;
+				PAD[i] = gen32();
+
+				uint32_t x = (trail_PAD[i]) ^ (PAD[i]);
+				while (x > 0) {	pad_hamming_distance = pad_hamming_distance + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+				if (best_pad_hamming_distance[i] == 0) {
+					best_PAD[i] = PAD[i];
+					best_pad_index[i] = counter;
+					best_pad_hamming_distance[i] = pad_hamming_distance;
+				}
+				else {
+					best_PAD[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_PAD[i] : PAD[i];
+					best_pad_index[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_pad_index[i] : counter;
+					best_pad_hamming_distance[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_pad_hamming_distance[i] : pad_hamming_distance;
+				}
+			}
+		}
+
+		for (int i=0; i<16; i++) {
+			trailPAD[cacheline] = (trailPAD[cacheline] << 32) | best_PAD[16-i-1];
+		}
+
+		encrypted_data = trailPAD[cacheline] ^ updated_data;
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		best_data_bit_flips = 0;
+		uint512_t x = stored_data ^ encrypted_data;
+		while (x > 0) {	best_data_bit_flips = best_data_bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+		//totalEncryptValSkpd += best_pad_index;
+		//totalEncryptValTested += counter;
+		bitFlips += best_data_bit_flips;
+		int write_slots = 1 + (best_data_bit_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		pkt->payloadDelay += 25000;
+		numWriteReqs++;
+	}
+		break;
+
+	case 9: {
+		//DEUCE-N
+
+		uint512_t PAD = gen512();
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+
+		if (!(cacheline_epoch[cacheline])) {
+			encrypted_data = PAD ^ (updated_data);
+			if(cacheline_stats[cacheline] != 1) numOfTimesTotalCacheLineEncrp += 1;		// stat after first write
+
+			// clear all the flags that were set for previous writes 		(prev_modified_words[cacheline])->clear(); pkt->clearModifiedWordsFlag();
+			for(int i=0; i<32; i++)	(*(modified_words_flags[cacheline]))[i] = 0;
+		}
+		else
+		{
+			vector<uint16_t> modifiedWordsPAD(32);
+			vector<uint16_t> modifiedWords(32);
+			for(int i=0; i<32; i++)
+			{
+				if((*(modified_words_flags[cacheline]))[i] == 1) {
+					uint16_t temp1 = (uint64_t)(updated_data >> (512 - (i+1)*16)); modifiedWords[i] = temp1;
+					uint16_t temp2 = (uint64_t)(PAD >> (512 - (i+1)*16)); modifiedWordsPAD[i] = temp2;
+				}
+				else {
+					uint16_t temp1 = (uint64_t)(stored_data >> (512 - (i+1)*16)); modifiedWords[i] = temp1;
+					uint16_t temp2 = 0x0000; modifiedWordsPAD[i] = temp2;
+				}
+			}
+
+			uint512_t temp_PAD = 0;
+			uint512_t temp_updated_data = 0;
+			for(int i=0; i<32; i++)
+			{
+				temp_PAD = (temp_PAD << 16) | modifiedWordsPAD[i];
+				temp_updated_data = (temp_updated_data << 16) | modifiedWords[i];
+			}
+			// PAD = PAD << (512-modified_words*16); //2 bytes(16bits per word)
+			encrypted_data = temp_PAD ^ (temp_updated_data);
+			numOfTimesPartialCacheLineEncrp += 1;
+		}
+		cacheline_epoch[cacheline] = (cacheline_epoch[cacheline]+1)%deuce_epoch; // epoch interval is 32
+		if(cacheline_stats[cacheline] > 4) {
+			if(cacheline_stats_4.find(cacheline) == cacheline_stats_4.end()) {
+				cacheline_stats_4[cacheline] = 0;
+				numCacheLinesWritten1_4 += 1;
+				numCacheLinesWritten_4 += 1;
+			}
+		}
+		if(cacheline_stats[cacheline] > 8) {
+			if(cacheline_stats_8.find(cacheline) == cacheline_stats_8.end()) {
+				cacheline_stats_8[cacheline] = 0;
+				numCacheLinesWritten1_8 += 1;
+				numCacheLinesWritten_8 += 1;
+			}
+		}
+		if(cacheline_stats[cacheline] > 16) {
+			if(cacheline_stats_16.find(cacheline) == cacheline_stats_16.end()) {
+				cacheline_stats_16[cacheline] = 0;
+				numCacheLinesWritten1_16 += 1;
+				numCacheLinesWritten_16 += 1;
+			}
+		}
+		if(cacheline_stats[cacheline] > 32) {
+			if(cacheline_stats_32.find(cacheline) == cacheline_stats_32.end()) {
+				cacheline_stats_32[cacheline] = 0;
+				numCacheLinesWritten1_32 += 1;
+				numCacheLinesWritten_32 += 1;
+			}
+		}
+		if(cacheline_stats[cacheline] > 64) {
+			if(cacheline_stats_64.find(cacheline) == cacheline_stats_64.end()) {
+				cacheline_stats_64[cacheline] = 0;
+				numCacheLinesWritten1_64 += 1;
+				numCacheLinesWritten_64 += 1;
+			}
+		}
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		uint512_t x = (stored_data) ^ (encrypted_data);
+		unsigned bit_flips = 0;
+		while (x > 0) {	bit_flips = bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; }
+
+		bitFlips += bit_flips;
+		int write_slots = 1 + (bit_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		numWriteReqs++;
+	}
+		break;
+
+	case 10: {
+		//DEUCE-N + TSECME
+
+		unsigned bit_flips = 0;
+		unsigned best_flips = 0;
+		unsigned max_flips = 0;
+		int best_flips_index = 0;
+		uint512_t best_flips_encrypted_data = 0;
+		int counter = 0;
+		int found = 0;
+		uint512_t PAD;
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+
+		uint32_t current_epoch = cacheline_epoch[cacheline];
+		while(current_epoch) {
+			counter++;
+			found = 1;
+			bit_flips = 0;
+			PAD = gen512();
+			vector<uint16_t> modifiedWordsPAD(32);
+			vector<uint16_t> modifiedWords(32);
+
+			for(int i=0; i<32; i++)
+			{
+				if((*(modified_words_flags[cacheline]))[i] == 1) {
+					uint16_t temp1 = (uint64_t)(updated_data >> (512 - (i+1)*16)); modifiedWords[i] = temp1;
+					uint16_t temp2 = (uint64_t)(PAD >> (512 - (i+1)*16)); modifiedWordsPAD[i] = temp2;
+				}
+				else {
+					uint16_t temp1 = (uint64_t)(stored_data >> (512 - (i+1)*16)); modifiedWords[i] = temp1;
+					uint16_t temp2 = 0x0000; modifiedWordsPAD[i] = temp2;
+				}
+			}
+
+			uint512_t temp_PAD = 0;
+			uint512_t temp_updated_data = 0;
+			for(int i=0; i<32; i++)
+			{
+				temp_PAD = (temp_PAD << 16) | modifiedWordsPAD[i];
+				temp_updated_data = (temp_updated_data << 16) | modifiedWords[i];
+			}
+			// PAD = PAD << (512-modified_words*16); //2 bytes(16bits per word)
+			encrypted_data = temp_PAD ^ (temp_updated_data);
+
+			uint512_t x = (stored_data) ^ (encrypted_data);
+			while (x > 0) {	bit_flips = bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+			if (best_flips == 0) {
+				best_flips =  bit_flips;
+				best_flips_encrypted_data = encrypted_data;
+				best_flips_index = counter;
+				max_flips = bit_flips;
+			}
+			else {
+				best_flips = (best_flips < bit_flips) ? best_flips : bit_flips;
+				best_flips_encrypted_data = (best_flips < bit_flips) ? best_flips_encrypted_data : encrypted_data;
+				best_flips_index = (best_flips < bit_flips) ? best_flips_index : counter;
+				max_flips = (max_flips >= bit_flips) ? max_flips : bit_flips;
+			}
+
+			if (counter >= 16) break;
+
+			current_epoch = (current_epoch+1)%deuce_epoch; // epoch interval is 32
+
+		}
+
+		if (!found) {
+			cacheline_epoch[cacheline] = (cacheline_epoch[cacheline]+1)%deuce_epoch; // epoch interval is 32
+			counter++;
+			PAD = gen512();
+			best_flips_encrypted_data = PAD ^ (updated_data);
+			best_flips_index = 1;
+
+			int bit_flips = 0;
+			uint512_t x = (stored_data) ^ (best_flips_encrypted_data);
+			while (x > 0) { bit_flips = bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+			max_flips = bit_flips;
+			best_flips = bit_flips;
+
+			if(cacheline_stats[cacheline] != 1) numOfTimesTotalCacheLineEncrp += 1;
+
+			for(int i=0; i<32; i++)	(*(modified_words_flags[cacheline]))[i] = 0;
+		}
+		else {
+			cacheline_epoch[cacheline] = (cacheline_epoch[cacheline] + best_flips_index)%deuce_epoch;
+			numOfTimesPartialCacheLineEncrp += 1;
+		}
+
+		encrypted_data = best_flips_encrypted_data;
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		totalEncryptValSkpd += best_flips_index;
+		totalEncryptValTested += counter;
+		bitFlips += best_flips;
+		int write_slots = 1 + (best_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		pkt->payloadDelay += 25000;
+		numWriteReqs++;
+	}
+		break;
+
+	case 11: {
+		//DEUCE-N + TSECME
+
+		uint512_t best_flips_encrypted_data = 0;
+		int counter = 0;
+		int found = 0;
+		uint512_t bestPAD = 0;
+		uint512_t best_PAD =0;
+		uint512_t PAD;
+		int pad_hamming_distance = 0;
+		int best_pad_hamming_distance = 0;
+		int best_pad_index = 0;
+		int best_data_bit_flips = 0;
+#ifdef DEBUG
+		int max_pad_hamming_distance = 0;
+		int max_data_bit_flips = 0;
+#endif
+		vector<uint16_t> lead_PAD(32);
+		vector<uint16_t> trail_PAD(32);
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			trailPAD[cacheline] = leadPAD[cacheline] = gen512();
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+
+		uint32_t current_epoch = cacheline_epoch[cacheline];
+
+		for(int i=0; i<32; i++) { trail_PAD[i] = (uint16_t)(trailPAD[cacheline] >> (512 - (i+1)*16)); }
+		for(int i=0; i<32; i++) { lead_PAD[i] = (uint16_t)(leadPAD[cacheline] >> (512 - (i+1)*16)); }
+
+		//cout << "previous PAD: " << std::hex << prevPAD[cacheline] << endl;
+		while(current_epoch) {
+			counter++;
+			found = 1;
+			pad_hamming_distance = 0;
+			PAD = gen512();
+			uint512_t compare_PAD = 0;
+			vector<uint16_t> modifiedWordsPAD(32);
+
+			for(int i=0; i<32; i++)
+			{
+				if((*(modified_words_flags[cacheline]))[i] == 1) {
+					modifiedWordsPAD[i] = (uint64_t)(PAD >> (512 - (i+1)*16));
+					compare_PAD = (compare_PAD << 16) | lead_PAD[i];
+				}
+				else {
+					modifiedWordsPAD[i] = trail_PAD[i];
+					compare_PAD = (compare_PAD << 16) | trail_PAD[i];
+				}
+			}
+
+			uint512_t test_PAD = 0;
+			for(int i=0; i<32; i++) test_PAD = (test_PAD << 16) | modifiedWordsPAD[i];
+
+			uint512_t x = (test_PAD) ^ (compare_PAD);
+			while (x > 0) {	pad_hamming_distance = pad_hamming_distance + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+#ifdef DEBUG
+			int stat_data_bit_flips = 0;
+			uint512_t stat_encrypted_data = (test_PAD) ^ updated_data;
+			uint512_t bf = (stored_data) ^ (stat_encrypted_data);
+			while (bf > 0) { stat_data_bit_flips = stat_data_bit_flips + ((bf & 1) == 1 ? 1 : 0); bf >>= 1; };
+#endif
+
+			if (best_pad_hamming_distance == 0) {
+				best_pad_hamming_distance =  pad_hamming_distance;
+				bestPAD = PAD;
+				best_PAD = test_PAD;
+				best_pad_index = counter;
+#ifdef DEBUG
+				max_pad_hamming_distance = pad_hamming_distance;
+				best_data_bit_flips = stat_data_bit_flips;
+				max_data_bit_flips = stat_data_bit_flips;
+#endif
+			}
+			else {
+				bestPAD = (best_pad_hamming_distance < pad_hamming_distance) ? bestPAD : PAD;
+				best_PAD = (best_pad_hamming_distance < pad_hamming_distance) ? best_PAD : test_PAD;
+				best_pad_index = (best_pad_hamming_distance < pad_hamming_distance) ? best_pad_index : counter;
+
+#ifdef DEBUG
+				max_data_bit_flips = (max_pad_hamming_distance > pad_hamming_distance) ? max_data_bit_flips : ((max_data_bit_flips > stat_data_bit_flips) ? max_data_bit_flips : stat_data_bit_flips);
+				//best_data_bit_flips = (best_pad_hamming_distance < pad_hamming_distance) ? best_data_bit_flips : stat_data_bit_flips;
+				max_pad_hamming_distance = (max_pad_hamming_distance > pad_hamming_distance) ? max_pad_hamming_distance : pad_hamming_distance;
+#endif
+
+				best_pad_hamming_distance = (best_pad_hamming_distance < pad_hamming_distance) ? best_pad_hamming_distance : pad_hamming_distance;
+			}
+
+			if (counter >= 16) break;
+
+			current_epoch = (current_epoch+1)%deuce_epoch; // epoch interval is 32
+
+		}
+
+		if (!found) {
+			cacheline_epoch[cacheline] = (cacheline_epoch[cacheline]+1)%deuce_epoch; // epoch interval is 32
+			counter++;
+			pad_hamming_distance = 0;
+			bestPAD = best_PAD = gen512();
+			best_flips_encrypted_data = best_PAD ^ (updated_data);
+			best_pad_index = 1;
+
+			//uint512_t x = (stored_data) ^ (encrypted_data);
+			uint512_t x = bestPAD ^ trailPAD[cacheline];
+			while (x > 0) {	pad_hamming_distance = pad_hamming_distance + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+#ifdef DEBUG
+			int stat_data_bit_flips = 0;
+			uint512_t bf = (stored_data) ^ (best_flips_encrypted_data);
+			while (bf > 0) { stat_data_bit_flips = stat_data_bit_flips + ((bf & 1) == 1 ? 1 : 0); bf >>= 1; };
+			max_pad_hamming_distance = pad_hamming_distance;
+			max_data_bit_flips = stat_data_bit_flips;
+#endif
+
+			trailPAD[cacheline] = leadPAD[cacheline] = bestPAD;
+			if(cacheline_stats[cacheline] != 1)
+				numOfTimesTotalCacheLineEncrp += 1;
+
+			for(int i=0; i<32; i++) (*(modified_words_flags[cacheline]))[i] = 0;
+		}
+		else {
+			best_flips_encrypted_data = best_PAD ^ (updated_data);
+			cacheline_epoch[cacheline] = (cacheline_epoch[cacheline] + best_pad_index)%deuce_epoch;
+			leadPAD[cacheline] = bestPAD;
+			numOfTimesPartialCacheLineEncrp += 1;
+		}
+
+		encrypted_data = best_flips_encrypted_data;
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		best_data_bit_flips = 0;
+		uint512_t x = stored_data ^ encrypted_data;
+		while (x > 0) {	best_data_bit_flips = best_data_bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+		totalEncryptValSkpd += best_pad_index;
+		totalEncryptValTested += counter;
+		bitFlips += best_data_bit_flips;
+		int write_slots = 1 + (best_data_bit_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		pkt->payloadDelay += 25000;
+		numWriteReqs++;
+	}
+		break;
+
+	case 12: {
+
+		uint512_t best_flips_encrypted_data = 0;
+		int counter = 0;
+		int found = 0;
+		uint512_t bestPAD = 0;
+		uint512_t best_PAD =0;
+		uint512_t PAD;
+		int pad_hamming_distance = 0;
+		int best_pad_hamming_distance = 0;
+		int best_pad_index = 0;
+		int best_data_bit_flips = 0;
+#ifdef DEBUG
+		int max_pad_hamming_distance = 0;
+		int max_data_bit_flips = 0;
+#endif
+		vector<uint16_t> lead_PAD(32);
+		vector<uint16_t> trail_PAD(32);
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			trailPAD[cacheline] = leadPAD[cacheline] = gen512();
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+
+		uint32_t current_epoch = cacheline_epoch[cacheline];
+
+		for(int i=0; i<32; i++) { trail_PAD[i] = (uint16_t)(trailPAD[cacheline] >> (512 - (i+1)*16)); }
+		for(int i=0; i<32; i++) { lead_PAD[i] = (uint16_t)(leadPAD[cacheline] >> (512 - (i+1)*16)); }
+
+		//cout << "previous PAD: " << std::hex << prevPAD[cacheline] << endl;
+		while(current_epoch) {
+			counter++;
+			found = 1;
+			pad_hamming_distance = 0;
+			PAD = gen512();
+			uint512_t compare_PAD = 0;
+			vector<uint16_t> modifiedWordsPAD(32);
+
+			for(int i=0; i<32; i++)
+			{
+				if((*(modified_words_flags[cacheline]))[i] == 1) {
+					modifiedWordsPAD[i] = (uint64_t)(PAD >> (512 - (i+1)*16));
+					compare_PAD = (compare_PAD << 16) | lead_PAD[i];
+				}
+				else {
+					modifiedWordsPAD[i] = trail_PAD[i];
+					compare_PAD = (compare_PAD << 16) | trail_PAD[i];
+				}
+			}
+
+			uint512_t test_PAD = 0;
+			for(int i=0; i<32; i++) test_PAD = (test_PAD << 16) | modifiedWordsPAD[i];
+
+			uint512_t x = (test_PAD) ^ (compare_PAD);
+			while (x > 0) {	pad_hamming_distance = pad_hamming_distance + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+#ifdef DEBUG
+			int stat_data_bit_flips = 0;
+			uint512_t stat_encrypted_data = (test_PAD) ^ updated_data;
+			uint512_t bf = (stored_data) ^ (stat_encrypted_data);
+			while (bf > 0) { stat_data_bit_flips = stat_data_bit_flips + ((bf & 1) == 1 ? 1 : 0); bf >>= 1; };
+#endif
+
+			if (best_pad_hamming_distance == 0) {
+				best_pad_hamming_distance =  pad_hamming_distance;
+				bestPAD = PAD;
+				best_PAD = test_PAD;
+				best_pad_index = counter;
+#ifdef DEBUG
+				max_pad_hamming_distance = pad_hamming_distance;
+				best_data_bit_flips = stat_data_bit_flips;
+				max_data_bit_flips = stat_data_bit_flips;
+#endif
+			}
+			else {
+				bestPAD = (best_pad_hamming_distance < pad_hamming_distance) ? bestPAD : PAD;
+				best_PAD = (best_pad_hamming_distance < pad_hamming_distance) ? best_PAD : test_PAD;
+				best_pad_index = (best_pad_hamming_distance < pad_hamming_distance) ? best_pad_index : counter;
+
+#ifdef DEBUG
+				max_data_bit_flips = (max_pad_hamming_distance > pad_hamming_distance) ? max_data_bit_flips : ((max_data_bit_flips > stat_data_bit_flips) ? max_data_bit_flips : stat_data_bit_flips);
+				//best_data_bit_flips = (best_pad_hamming_distance < pad_hamming_distance) ? best_data_bit_flips : stat_data_bit_flips;
+				max_pad_hamming_distance = (max_pad_hamming_distance > pad_hamming_distance) ? max_pad_hamming_distance : pad_hamming_distance;
+#endif
+
+				best_pad_hamming_distance = (best_pad_hamming_distance < pad_hamming_distance) ? best_pad_hamming_distance : pad_hamming_distance;
+			}
+
+			if (counter >= 16) break;
+
+			current_epoch = (current_epoch+1)%deuce_epoch; // epoch interval is 32
+
+		}
+
+		if (!found) {
+			cacheline_epoch[cacheline] = (cacheline_epoch[cacheline]+1)%deuce_epoch; // epoch interval is 32
+			counter++;
+			pad_hamming_distance = 0;
+			bestPAD = best_PAD = gen512();
+			best_flips_encrypted_data = best_PAD ^ (updated_data);
+			best_pad_index = 1;
+
+			//uint512_t x = (stored_data) ^ (encrypted_data);
+			uint512_t x = bestPAD ^ trailPAD[cacheline];
+			while (x > 0) {	pad_hamming_distance = pad_hamming_distance + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+#ifdef DEBUG
+			int stat_data_bit_flips = 0;
+			uint512_t bf = (stored_data) ^ (best_flips_encrypted_data);
+			while (bf > 0) { stat_data_bit_flips = stat_data_bit_flips + ((bf & 1) == 1 ? 1 : 0); bf >>= 1; };
+			max_pad_hamming_distance = pad_hamming_distance;
+			max_data_bit_flips = stat_data_bit_flips;
+#endif
+
+			trailPAD[cacheline] = leadPAD[cacheline] = bestPAD;
+			if(cacheline_stats[cacheline] != 1)
+				numOfTimesTotalCacheLineEncrp += 1;
+
+			for(int i=0; i<32; i++) (*(modified_words_flags[cacheline]))[i] = 0;
+		}
+		else {
+			best_flips_encrypted_data = best_PAD ^ (updated_data);
+			cacheline_epoch[cacheline] = (cacheline_epoch[cacheline] + best_pad_index)%deuce_epoch;
+			leadPAD[cacheline] = bestPAD;
+			numOfTimesPartialCacheLineEncrp += 1;
+		}
+
+		encrypted_data = best_flips_encrypted_data;
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		best_data_bit_flips = 0;
+		uint512_t x = stored_data ^ encrypted_data;
+		while (x > 0) {	best_data_bit_flips = best_data_bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+		totalEncryptValSkpd += best_pad_index;
+		totalEncryptValTested += counter;
+		bitFlips += best_data_bit_flips;
+		int write_slots = 1 + (best_data_bit_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		pkt->payloadDelay += 25000;
+		numWriteReqs++;
+	}
+		break;
+
+	case 13: {
+		//DEUCE1-N
+
+		uint512_t PAD = gen512();
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+
+		if (!(cacheline_epoch[cacheline])) {
+			encrypted_data = PAD ^ (updated_data);
+			if(cacheline_stats[cacheline] != 1) numOfTimesTotalCacheLineEncrp += 1;		// stat after first write
+
+			// clear all the flags that were set for previous writes 		(prev_modified_words[cacheline])->clear(); pkt->clearModifiedWordsFlag();
+			for(int i=0; i<32; i++)	(*(modified_words_flags[cacheline]))[i] = 0;
+		}
+		else
+		{
+			vector<uint16_t> modifiedWordsPAD(32);
+			vector<uint16_t> modifiedWords(32);
+			for(int i=0; i<32; i++)
+			{
+				if((*(modified_words_flags[cacheline]))[i] == 1) {
+					uint16_t temp1 = (uint64_t)(updated_data >> (512 - (i+1)*16)); modifiedWords[i] = temp1;
+					uint16_t temp2 = (uint64_t)(PAD >> (512 - (i+1)*16)); modifiedWordsPAD[i] = temp2;
+				}
+				else {
+					uint16_t temp1 = (uint64_t)(stored_data >> (512 - (i+1)*16)); modifiedWords[i] = temp1;
+					uint16_t temp2 = 0x0000; modifiedWordsPAD[i] = temp2;
+				}
+			}
+
+			uint512_t temp_PAD = 0;
+			uint512_t temp_updated_data = 0;
+			for(int i=0; i<32; i++)
+			{
+				temp_PAD = (temp_PAD << 16) | modifiedWordsPAD[i];
+				temp_updated_data = (temp_updated_data << 16) | modifiedWords[i];
+			}
+			// PAD = PAD << (512-modified_words*16); //2 bytes(16bits per word)
+			encrypted_data = temp_PAD ^ (temp_updated_data);
+			numOfTimesPartialCacheLineEncrp += 1;
+		}
+		cacheline_epoch[cacheline] = (cacheline_epoch[cacheline]+1)%deuce_epoch;
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		bool storedInCounterCache = false;
+		if(wordsModifiedThisWrite == 1) {
+			if(!cc->hasData(cacheline)) {
+				cc->setData(cacheline, wordsModifiedThisWriteIndex);
+				storedInCounterCache = true;
+			}
+			else {
+				int word = cc->getData(cacheline);
+				if(word == wordsModifiedThisWriteIndex) {
+					storedInCounterCache = true;
+				}
+				else {
+					cc->setData(cacheline, wordsModifiedThisWriteIndex);
+				}
+			}
+		}
+
+		if(storedInCounterCache) {
+			int write_slots = 0;
+			totalWriteSlots += write_slots;
+			delay = tWR*write_slots;
+			numWriteReqs++;
+			writesSavedAtCC += 1;
+			return false;
+		}
+		else {
+			if(cacheline_stats[cacheline] == 1) {
+				pkt->dlyDueToBitFips = tWR*2;
+				return tWR*2;
+			}
+
+			uint512_t x = (stored_data) ^ (encrypted_data);
+			unsigned bit_flips = 0;
+			while (x > 0) {	bit_flips = bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; } bitFlips += bit_flips;
+			int write_slots = 1 + (bit_flips/64);
+			totalWriteSlots += write_slots;
+			delay = tWR*write_slots;
+			numWriteReqs++;
+		}
+	}
+		break;
+
+	case 14: {
+
+		uint256_t best_PAD[2] = {0};
+		uint256_t trail_PAD[2] = {0};
+		int best_pad_hamming_distance[2] = {0};
+		int best_pad_index[2] = {0};
+		int best_data_bit_flips = {0};
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			trailPAD[cacheline] = leadPAD[cacheline] = gen512();
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+
+		for (int i=0; i<2; i++) {
+			trail_PAD[i] = (uint256_t)(trailPAD[cacheline] >> 256*i);
+
+			int counter = 0;
+			while(counter < 16) {
+				counter++;
+				uint256_t PAD[2];
+
+				int pad_hamming_distance = 0;
+				PAD[i] = gen256();
+
+				uint256_t x = (trail_PAD[i]) ^ (PAD[i]);
+				while (x > 0) {	pad_hamming_distance = pad_hamming_distance + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+				if (best_pad_hamming_distance[i] == 0) {
+					best_PAD[i] = PAD[i];
+					best_pad_index[i] = counter;
+					best_pad_hamming_distance[i] = pad_hamming_distance;
+				}
+				else {
+					best_PAD[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_PAD[i] : PAD[i];
+					best_pad_index[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_pad_index[i] : counter;
+					best_pad_hamming_distance[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_pad_hamming_distance[i] : pad_hamming_distance;
+				}
+			}
+		}
+
+		for (int i=0; i<2; i++) {
+			trailPAD[cacheline] = (trailPAD[cacheline] << 256) | best_PAD[2-i-1];
+		}
+
+		encrypted_data = trailPAD[cacheline] ^ updated_data;
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		best_data_bit_flips = 0;
+		uint512_t x = stored_data ^ encrypted_data;
+		while (x > 0) {	best_data_bit_flips = best_data_bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+		//totalEncryptValSkpd += best_pad_index;
+		//totalEncryptValTested += counter;
+		bitFlips += best_data_bit_flips;
+		int write_slots = 1 + (best_data_bit_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		pkt->payloadDelay += 25000;
+		numWriteReqs++;
+	}
+		break;
+
+	case 15: {
+
+		uint16_t best_PAD[32] = {0};
+		uint16_t trail_PAD[32] = {0};
+		int best_pad_hamming_distance[32] = {0};
+		int best_pad_index[32] = {0};
+		int best_data_bit_flips = {0};
+
+		uint64_t cacheline = pkt->getBlockAddr(64);
+		if(cacheline_epoch.find(cacheline) == cacheline_epoch.end()) {
+			cacheline_epoch[cacheline] = 0;
+			cacheline_stats[cacheline] = 0;
+			trailPAD[cacheline] = leadPAD[cacheline] = gen512();
+			numCacheLinesWritten += 1;
+		}
+		cacheline_stats[cacheline] += 1;
+
+		for (int i=0; i<32; i++) {
+			trail_PAD[i] = (uint16_t)(trailPAD[cacheline] >> 16*i);
+
+			int counter = 0;
+			while(counter < 16) {
+				counter++;
+				uint16_t PAD[32];
+
+				int pad_hamming_distance = 0;
+				PAD[i] = gen16();
+
+				uint16_t x = (trail_PAD[i]) ^ (PAD[i]);
+				while (x > 0) {	pad_hamming_distance = pad_hamming_distance + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+				if (best_pad_hamming_distance[i] == 0) {
+					best_PAD[i] = PAD[i];
+					best_pad_index[i] = counter;
+					best_pad_hamming_distance[i] = pad_hamming_distance;
+				}
+				else {
+					best_PAD[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_PAD[i] : PAD[i];
+					best_pad_index[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_pad_index[i] : counter;
+					best_pad_hamming_distance[i] = (best_pad_hamming_distance[i] < pad_hamming_distance) ? best_pad_hamming_distance[i] : pad_hamming_distance;
+				}
+			}
+		}
+
+		for (int i=0; i<32; i++) {
+			trailPAD[cacheline] = (trailPAD[cacheline] << 16) | best_PAD[32-i-1];
+		}
+
+		encrypted_data = trailPAD[cacheline] ^ updated_data;
+		storeEncryptedData(pkt,(uint8_t *)&encrypted_data);
+
+		if(cacheline_stats[cacheline] == 1) {
+			pkt->dlyDueToBitFips = tWR*2;
+			return true;
+		}
+
+		best_data_bit_flips = 0;
+		uint512_t x = stored_data ^ encrypted_data;
+		while (x > 0) {	best_data_bit_flips = best_data_bit_flips + ((x & 1) == 1 ? 1 : 0); x >>= 1; };
+
+		//totalEncryptValSkpd += best_pad_index;
+		//totalEncryptValTested += counter;
+		bitFlips += best_data_bit_flips;
+		int write_slots = 1 + (best_data_bit_flips/64);
+		totalWriteSlots += write_slots;
+		delay = tWR*write_slots;
+		pkt->payloadDelay += 25000;
+		numWriteReqs++;
+	}
+		break;
+
+	default:
+		cout << "ERRORRRRR!!!" << endl;
+		break;
+	}
+
+	pkt->dlyDueToBitFips = delay;
+
+	return true;
+}
+
 void
 DRAMCtrl::doDRAMAccess(DRAMPacket* dram_pkt)
 {
-    DPRINTF(DRAM, "Timing access to addr %lld, rank/bank/row %d %d %d\n",
-            dram_pkt->addr, dram_pkt->rank, dram_pkt->bank, dram_pkt->row);
+    //DPRINTF(DRAM, "Timing access to addr %lld, rank/bank/row %d %d %d\n",
+    //        dram_pkt->addr, dram_pkt->rank, dram_pkt->bank, dram_pkt->row);
 
     // get the rank
     Rank& rank = dram_pkt->rankRef;
@@ -1119,18 +2821,23 @@ DRAMCtrl::doDRAMAccess(DRAMPacket* dram_pkt)
     // get the bank
     Bank& bank = dram_pkt->bankRef;
 
+    DPRINTF(DRAM, "doDRAM Access: rank/bank/row %d %d %d preAllowedAt: %d, curTick: %d, diff: \n",
+        	                dram_pkt->rank, dram_pkt->bank, dram_pkt->row, bank.preAllowedAt, curTick(), bank.preAllowedAt-curTick());
+
     // for the state we need to track if it is a row hit or not
     bool row_hit = true;
 
     // Determine the access latency and update the bank state
-    if (bank.openRow == dram_pkt->row) {
+    //if (bank.openRow == dram_pkt->row) {
         // nothing to do
-    } else {
-        row_hit = false;
+    //} else {
+    //    row_hit = false;
 
         // If there is a page open, precharge it.
         if (bank.openRow != Bank::NO_ROW) {
             prechargeBank(rank, bank, std::max(bank.preAllowedAt, curTick()));
+            DPRINTF(DRAM, "doDRAM Access: rank/bank/row %d %d %d prechargeBank at: %d, curTick: %d, diff: \n",
+					dram_pkt->rank, dram_pkt->bank, dram_pkt->row, bank.preAllowedAt, curTick(), (std::max(bank.preAllowedAt, curTick())) - curTick());
         }
 
         // next we need to account for the delay in activating the
@@ -1140,7 +2847,7 @@ DRAMCtrl::doDRAMAccess(DRAMPacket* dram_pkt)
         // Record the activation and deal with all the global timing
         // constraints caused be a new activation (tRRD and tXAW)
         activateBank(rank, bank, act_tick, dram_pkt->row);
-    }
+    //}
 
     // respect any constraints on the command (e.g. tRCD or tCCD)
     const Tick col_allowed_at = dram_pkt->isRead() ?
@@ -1152,6 +2859,11 @@ DRAMCtrl::doDRAMAccess(DRAMPacket* dram_pkt)
 
     // update the packet ready time
     dram_pkt->readyTime = cmd_at + tCL + tBURST;
+
+    DPRINTF(DRAM, "doDRAM Access: rank/bank/row %d %d %d preAllowedAt: %d, actAllowedAt: %d, col_allowed_at: %d, cmd_at: %d, readyTime: %d , readQueue: %d, writeQueue: %d\n",
+        	                dram_pkt->rank, dram_pkt->bank, dram_pkt->row, bank.preAllowedAt-curTick(),
+        	                bank.actAllowedAt-curTick(), col_allowed_at-curTick(), cmd_at-curTick(), dram_pkt->readyTime-curTick(),
+        	                totalReadQueueSize, totalWriteQueueSize);
 
     // update the time for the next read/write burst for each
     // bank (add a max with tCCD/tCCD_L/tCCD_L_WR here)
@@ -1197,12 +2909,50 @@ DRAMCtrl::doDRAMAccess(DRAMPacket* dram_pkt)
     // Save rank of current access
     activeRank = dram_pkt->rank;
 
-    // If this is a write, we also need to respect the write recovery
-    // time before a precharge, in the case of a read, respect the
-    // read to precharge constraint
-    bank.preAllowedAt = std::max(bank.preAllowedAt,
+    if(bitFlipsDelay) {
+    	// If this is a write, we also need to respect the write recovery
+    	// time before a precharge, in the case of a read, respect the
+    	// read to precharge constraint
+    	bank.preAllowedAt = std::max(bank.preAllowedAt,
                                  dram_pkt->isRead() ? cmd_at + tRTP :
-                                 dram_pkt->readyTime + tWR);
+                                 dram_pkt->readyTime + dram_pkt->dly_due_to_bit_flips); //tWR);
+    }
+    else if(reram) {
+    	//std::vector<uint8_t> actual_data_bytes(pkt->getSize());
+    	//std::vector<uint8_t> stored_data_bytes(pkt->getSize());
+    	//std::vector<uint8_t> updated_data_bytes(pkt->getSize());
+    	//uint512_t actual_data=0, updated_data=0;
+
+    	//getMemoryData(pkt, &actual_data_bytes[0], &stored_data_bytes[0]);
+    	//pkt->writeData(&updated_data_bytes[0]);
+
+    	//if(pkt->hasData())
+    	//{
+    	//	for (int i=0; i<pkt->getSize(); i++) {
+    	//		actual_data = actual_data<<8 | actual_data_bytes[i];
+    	//		updated_data = updated_data<<8 | updated_data_bytes[i];
+    	//	}
+    	//}
+    	//uint512_t compData = (actual_data) ^ (updated_data);
+    	//if(compData == 0) {writesWithOutWordChanges += 1;}//pkt->dlyDueToBitFips = 0;return true;}
+
+    	//DPRINTF(DRAM, "doDRAM Access: rank/bank/row %d %d %d preAllowedAt: %d, actAllowedAt: %d, col_allowed_at: %d, cmd_at: %d, readyTime: %d\n",
+        //        dram_pkt->rank, dram_pkt->bank, dram_pkt->row, bank.preAllowedAt-curTick(),
+        //        bank.actAllowedAt-curTick(), col_allowed_at-curTick(), cmd_at-curTick(), dram_pkt->readyTime-curTick());
+
+    	int user_data = 224;
+    	int subArrayRow_delay = 0.4*((dram_pkt->row)%512);
+    	int maxSubArrayRow_delay = 0; //0.4*(512)*1000;
+    	int subArrayCol_delay = 0.4*user_data*1000;
+    	bank.preAllowedAt = std::max(bank.preAllowedAt,
+                                 dram_pkt->isRead() ? cmd_at + tRTP :
+                                 dram_pkt->readyTime + tWR + maxSubArrayRow_delay+ subArrayCol_delay);
+
+    	if(!dram_pkt->isRead())
+    		DPRINTF(DRAM, "ReRAM access to addr %lld, rank/bank/row %d %d %d, delay: %d, max delay: %d, subArrayVol_delay: %d, tWR: %d\n",
+                dram_pkt->addr, dram_pkt->rank, dram_pkt->bank, dram_pkt->row, subArrayRow_delay, maxSubArrayRow_delay, subArrayCol_delay, tWR);
+
+    }
 
     // increment the bytes accessed and the accesses per row
     bank.bytesAccessed += burstSize;
@@ -1228,33 +2978,79 @@ DRAMCtrl::doDRAMAccess(DRAMPacket* dram_pkt)
         bool got_more_hits = false;
         bool got_bank_conflict = false;
 
-        // either look at the read queue or write queue
-        const std::vector<DRAMPacketQueue>& queue =
-                dram_pkt->isRead() ? readQueue : writeQueue;
+        if(nvm) {
+        	// either look at the read queue or write queue
+			if(dram_pkt->isRead()) {
+				const std::vector<DRAMPacketQueue>& queue = readQueue;
 
-        for (uint8_t i = 0; i < numPriorities(); ++i) {
-            auto p = queue[i].begin();
-            // keep on looking until we find a hit or reach the end of the queue
-            // 1) if a hit is found, then both open and close adaptive policies keep
-            // the page open
-            // 2) if no hit is found, got_bank_conflict is set to true if a bank
-            // conflict request is waiting in the queue
-            // 3) make sure we are not considering the packet that we are
-            // currently dealing with
-            while (!got_more_hits && p != queue[i].end()) {
-                if (dram_pkt != (*p)) {
-                    bool same_rank_bank = (dram_pkt->rank == (*p)->rank) &&
-                                          (dram_pkt->bank == (*p)->bank);
+				for (uint8_t i = 0; i < numPriorities(); ++i) {
+					auto p = queue[i].begin();
+					// keep on looking until we find a hit or reach the end of the queue
+					// 1) if a hit is found, then both open and close adaptive policies keep
+					// the page open
+					// 2) if no hit is found, got_bank_conflict is set to true if a bank
+					// conflict request is waiting in the queue
+					// 3) make sure we are not considering the packet that we are
+					// currently dealing with
+					while (!got_more_hits && p != queue[i].end()) {
+						if (dram_pkt != (*p)) {
+							bool same_rank_bank = (dram_pkt->rank == (*p)->rank) &&
+												  (dram_pkt->bank == (*p)->bank);
 
-                    bool same_row = dram_pkt->row == (*p)->row;
-                    got_more_hits |= same_rank_bank && same_row;
-                    got_bank_conflict |= same_rank_bank && !same_row;
-                }
-                ++p;
-            }
+							bool same_row = dram_pkt->row == (*p)->row;
+							got_more_hits |= same_rank_bank && same_row;
+							got_bank_conflict |= same_rank_bank && !same_row;
+						}
+						++p;
+					}
 
-            if (got_more_hits)
-                break;
+					if (got_more_hits)
+						break;
+				}
+			}
+			else {
+				auto p = writeBuffer.begin();
+				while (!got_more_hits && p != writeBuffer.end()) {
+					if (dram_pkt != (*p)) {
+						bool same_rank_bank = (dram_pkt->rank == (*p)->rank) &&
+											  (dram_pkt->bank == (*p)->bank);
+
+						bool same_row = dram_pkt->row == (*p)->row;
+						got_more_hits |= same_rank_bank && same_row;
+						got_bank_conflict |= same_rank_bank && !same_row;
+					}
+					++p;
+				}
+			}
+        } else {
+			// either look at the read queue or write queue
+			const std::vector<DRAMPacketQueue>& queue =
+					dram_pkt->isRead() ? readQueue : writeQueue;
+
+			for (uint8_t i = 0; i < numPriorities(); ++i) {
+				auto p = queue[i].begin();
+				// keep on looking until we find a hit or reach the end of the queue
+				// 1) if a hit is found, then both open and close adaptive policies keep
+				// the page open
+				// 2) if no hit is found, got_bank_conflict is set to true if a bank
+				// conflict request is waiting in the queue
+				// 3) make sure we are not considering the packet that we are
+				// currently dealing with
+				while (!got_more_hits && p != queue[i].end()) {
+					if (dram_pkt != (*p)) {
+						bool same_rank_bank = (dram_pkt->rank == (*p)->rank) &&
+											  (dram_pkt->bank == (*p)->bank);
+
+						bool same_row = dram_pkt->row == (*p)->row;
+						got_more_hits |= same_rank_bank && same_row;
+						got_bank_conflict |= same_rank_bank && !same_row;
+					}
+					++p;
+				}
+
+				if (got_more_hits)
+					break;
+			}
         }
 
         // auto pre-charge when either
@@ -1275,8 +3071,8 @@ DRAMCtrl::doDRAMAccess(DRAMPacket* dram_pkt)
     // Update bus state to reflect when previous command was issued
     nextBurstAt = cmd_at + tBURST;
 
-    DPRINTF(DRAM, "Access to %lld, ready at %lld next burst at %lld.\n",
-            dram_pkt->addr, dram_pkt->readyTime, nextBurstAt);
+    //DPRINTF(DRAM, "Access to %lld, ready at %lld next burst at %lld.\n",
+    //        dram_pkt->addr, dram_pkt->readyTime, nextBurstAt);
 
     dram_pkt->rankRef.cmdList.push_back(Command(command, dram_pkt->bank,
                                         cmd_at));
@@ -1329,7 +3125,108 @@ DRAMCtrl::doDRAMAccess(DRAMPacket* dram_pkt)
 }
 
 void
-DRAMCtrl::processNextReqEvent()
+DRAMCtrl::insertEntryNVMWriteBuffer(DRAMPacket* dram_pkt)
+{
+	//cout << "WB: inserting address: " << dram_pkt->addr << endl;
+	writeBuffer.push_back(dram_pkt);
+	isInWriteBuffer.insert(burstAlign(dram_pkt->addr));
+
+	nvm_totalWriteBufferSize++;
+	if(nvm_totalWriteBufferSize >= nvm_wb_max_threshold)
+		nvm_wb_flushing = true;
+
+	return;
+}
+
+void
+DRAMCtrl::eraseEntryNVMWriteBuffer(DRAMPacket* dram_pkt)
+{
+	//cout << "WB: erasing address: " << dram_pkt->addr << endl;
+	isInWriteBuffer.erase(burstAlign(dram_pkt->addr));
+	//writeBuffer.erase(dram_pkt);
+
+	nvm_totalWriteBufferSize--;
+	if(nvm_totalWriteBufferSize < nvm_wb_min_threshold)
+		nvm_wb_flushing = false;
+
+	return;
+}
+
+void
+DRAMCtrl::try_flush_wb()
+{
+	//int MAX_WRITES = params->max_writes;
+	bool found = false;
+	DRAMPacketQueue::iterator to_write;
+
+	//change the bus state
+    //bool switched_cmd_type = busStateNext == READ ? TRUE : FALSE;
+
+	if(nvm_wb_flushing || (totalReadQueueSize == 0 && totalWriteQueueSize == 0 && nvm_totalWriteBufferSize > 0))
+	{
+		// Figure out which write request goes next
+		// If we are changing command type, incorporate the minimum
+		// bus turnaround delay which will be tCS (different rank) case
+		to_write = chooseNext((writeBuffer), 0);
+
+		if (to_write != writeBuffer.end()) {
+			// candidate read found
+			found = true;
+		}
+	}
+
+    // if no write to an available rank is found then return
+    // at this point. There could be writes to the available ranks
+    // which are above the required threshold. However, to
+    // avoid adding more complexity to the code, return and wait
+    // for a refresh event to kick things into action again.
+    if (!found) {
+        //DPRINTF(DRAM, "No Writes Found in Write Buffer\n");
+        return;
+    }
+
+    auto dram_pkt = *to_write;
+
+    //cout << "nvm_wb_flushing: " << nvm_wb_flushing << " totalReadQueueSize: " << totalReadQueueSize << " nvm_totalWriteBufferSize: " << nvm_totalWriteBufferSize  << " address: " << dram_pkt->addr << endl;
+
+	doDRAMAccess(dram_pkt);
+
+	// removed write from queue, decrement count
+	// --dram_pkt->rankRef.writeEntries;
+
+	// Schedule write done event to decrement event count
+	// after the readyTime has been reached
+	// Only schedule latest write event to minimize events
+	// required; only need to ensure that final event scheduled covers
+	// the time that writes are outstanding and bus is active
+	// to holdoff power-down entry events
+	if (!dram_pkt->rankRef.writeDoneEvent.scheduled()) {
+		schedule(dram_pkt->rankRef.writeDoneEvent, dram_pkt->readyTime);
+		// New event, increment count
+		++dram_pkt->rankRef.outstandingEvents;
+
+	} else if (dram_pkt->rankRef.writeDoneEvent.when() <
+			   dram_pkt->readyTime) {
+
+		reschedule(dram_pkt->rankRef.writeDoneEvent, dram_pkt->readyTime);
+	}
+
+	eraseEntryNVMWriteBuffer(dram_pkt);
+
+	writeBuffer.erase(to_write);
+
+	// log the response
+	//logResponse(MemCtrl::WRITE, dram_pkt->masterId(),
+	//			dram_pkt->qosValue(), dram_pkt->getAddr(), 1,
+	//			dram_pkt->readyTime - dram_pkt->entryTime);
+
+	delete dram_pkt;
+
+	return;
+}
+
+void
+DRAMCtrl::processNVMNextReqEvent()
 {
     // transition is handled by QoS algorithm if enabled
     if (turnPolicy) {
@@ -1342,21 +3239,21 @@ DRAMCtrl::processNextReqEvent()
     // record stats
     recordTurnaroundStats();
 
-    DPRINTF(DRAM, "QoS Turnarounds selected state %s %s\n",
-            (busState==MemCtrl::READ)?"READ":"WRITE",
-            switched_cmd_type?"[turnaround triggered]":"");
+    //DPRINTF(DRAM, "QoS Turnarounds selected state %s %s\n",
+    //        (busState==MemCtrl::READ)?"READ":"WRITE",
+    //        switched_cmd_type?"[turnaround triggered]":"");
 
     if (switched_cmd_type) {
         if (busState == READ) {
-            DPRINTF(DRAM,
-                    "Switching to writes after %d reads with %d reads "
-                    "waiting\n", readsThisTime, totalReadQueueSize);
+            //DPRINTF(DRAM,
+            //        "Switching to writes after %d reads with %d reads "
+            //        "waiting\n", readsThisTime, totalReadQueueSize);
             rdPerTurnAround.sample(readsThisTime);
             readsThisTime = 0;
         } else {
-            DPRINTF(DRAM,
-                    "Switching to reads after %d writes with %d writes "
-                    "waiting\n", writesThisTime, totalWriteQueueSize);
+            //DPRINTF(DRAM,
+            //        "Switching to reads after %d writes with %d writes "
+            //        "waiting\n", writesThisTime, totalWriteQueueSize);
             wrPerTurnAround.sample(writesThisTime);
             writesThisTime = 0;
         }
@@ -1421,7 +3318,7 @@ DRAMCtrl::processNextReqEvent()
                 (drainState() == DrainState::Draining ||
                  totalWriteQueueSize > writeLowThreshold)) {
 
-                DPRINTF(DRAM, "Switching to writes due to read queue empty\n");
+                //DPRINTF(DRAM, "Switching to writes due to read queue empty\n");
                 switch_to_writes = true;
             } else {
                 // check if we are drained
@@ -1472,7 +3369,367 @@ DRAMCtrl::processNextReqEvent()
             // avoid adding more complexity to the code, return and wait
             // for a refresh event to kick things into action again.
             if (!read_found) {
-                DPRINTF(DRAM, "No Reads Found - exiting\n");
+                //DPRINTF(DRAM, "No Reads Found - exiting\n");
+                return;
+            }
+
+            auto dram_pkt = *to_read;
+
+            bool found = false;
+
+            //cout << "WB: checking for address: " << dram_pkt->addr << endl;
+            if(isInWriteBuffer.find(burstAlign(dram_pkt->addr)) != isInWriteBuffer.end())
+            {
+            	dram_pkt->readyTime = curTick() + 1;
+            	//cout << "WB serviced read address: " << dram_pkt->addr << " write buffer length: " << nvm_totalWriteBufferSize <<"("<<isInWriteBuffer.size()<<")"<< endl;
+            	servicedByWrB++;
+            	found = true;
+            }
+            else {
+            	assert(dram_pkt->rankRef.inRefIdleState());
+            	doDRAMAccess(dram_pkt);
+            }
+
+            // sanity check
+            assert(dram_pkt->size <= burstSize);
+            assert(dram_pkt->readyTime >= curTick());
+
+            // log the response
+            logResponse(MemCtrl::READ, (*to_read)->masterId(),
+                        dram_pkt->qosValue(), dram_pkt->getAddr(), 1,
+                        dram_pkt->readyTime - dram_pkt->entryTime);
+
+            if(found) {
+                --dram_pkt->rankRef.readEntries;
+                //DPRINTF(DRAM, "number of read entries for rank %d is %d\n",
+                //        dram_pkt->rank, dram_pkt->rankRef.readEntries);
+
+				if (dram_pkt->burstHelper) {
+					// it is a split packet
+					dram_pkt->burstHelper->burstsServiced++;
+					if (dram_pkt->burstHelper->burstsServiced ==
+						dram_pkt->burstHelper->burstCount) {
+						// we have now serviced all children packets of a system packet
+						// so we can now respond to the requester
+						// @todo we probably want to have a different front end and back
+						// end latency for split packets
+						accessAndRespond(dram_pkt->pkt, frontendLatency);
+						delete dram_pkt->burstHelper;
+						dram_pkt->burstHelper = NULL;
+					}
+				} else {
+					// it is not a split packet
+					accessAndRespond(dram_pkt->pkt, frontendLatency);
+				}
+            }
+            else {
+            	// Every respQueue which will generate an event, increment count
+				++dram_pkt->rankRef.outstandingEvents;
+
+				// Insert into response queue. It will be sent back to the
+				// requester at its readyTime
+				if (respQueue.empty()) {
+					assert(!respondEvent.scheduled());
+					schedule(respondEvent, dram_pkt->readyTime);
+				} else {
+					assert(respQueue.back()->readyTime <= dram_pkt->readyTime);
+					assert(respondEvent.scheduled());
+				}
+
+				respQueue.push_back(dram_pkt);
+            }
+
+            // we have so many writes that we have to transition
+            if (totalWriteQueueSize > writeHighThreshold) {
+                switch_to_writes = true;
+            }
+
+            // remove the request from the queue - the iterator is no longer valid .
+            readQueue[dram_pkt->qosValue()].erase(to_read);
+        }
+
+        // switching to writes, either because the read queue is empty
+        // and the writes have passed the low threshold (or we are
+        // draining), or because the writes hit the hight threshold
+        if (switch_to_writes) {
+            // transition to writing
+            busStateNext = WRITE;
+        }
+    } else {
+
+        bool write_found = false;
+        DRAMPacketQueue::iterator to_write;
+        uint8_t prio = numPriorities();
+
+        for (auto queue = writeQueue.rbegin();
+             queue != writeQueue.rend(); ++queue) {
+
+            prio--;
+
+            DPRINTF(QOS,
+                    "DRAM controller checking WRITE queue [%d] priority [%d elements]\n",
+                    prio, queue->size());
+
+            // If we are changing command type, incorporate the minimum
+            // bus turnaround delay
+            to_write = chooseNext((*queue),
+                                  switched_cmd_type ? std::min(tRTW, tCS) : 0);						// not required for NVM
+
+            if (to_write != queue->end()) {
+                write_found = true;
+                break;
+            }
+        }
+
+        // if there are no writes to a rank that is available to service
+        // requests (i.e. rank is in refresh idle state) are found then
+        // return. There could be reads to the available ranks. However, to
+        // avoid adding more complexity to the code, return at this point and
+        // wait for a refresh event to kick things into action again.
+        if (!write_found) {
+            //DPRINTF(DRAM, "No Writes Found - exiting\n");
+            return;
+        }
+
+        auto dram_pkt = *to_write;
+
+        bool removed = false, erase = false;
+
+        // check if found it can be merged with write buffer request
+        if(isInWriteBuffer.find(burstAlign(dram_pkt->addr)) != isInWriteBuffer.end())
+        {
+        	erase = true;
+        	removed = true;
+        }
+        else if(nvm_totalWriteBufferSize < nvm_write_buffer_size)
+        {
+			//DPRINTF(DRAM, "Adding to write buffer\n");
+			insertEntryNVMWriteBuffer(dram_pkt);
+
+			//cout << "WB insert write address: " << dram_pkt->addr << " wb size: " << nvm_totalWriteBufferSize << endl;
+			// Update stats
+			avgWrBLen = nvm_totalWriteBufferSize;
+
+			removed = true;
+        }
+
+        //assert(dram_pkt->rankRef.inRefIdleState());
+        // sanity check
+        //assert(dram_pkt->size <= burstSize);
+        //doDRAMAccess(dram_pkt);
+
+        if(removed) {
+
+        	dram_pkt->readyTime = curTick();
+
+        	// removed write from queue, decrement count
+            --dram_pkt->rankRef.writeEntries;
+			//isInWriteQueue.erase(burstAlign(dram_pkt->addr));
+            unordered_multiset<Addr>::iterator it = isInWriteQueue.find(burstAlign(dram_pkt->addr));
+            isInWriteQueue.erase(it);
+
+			// log the response
+			logResponse(MemCtrl::WRITE, dram_pkt->masterId(),
+						dram_pkt->qosValue(), dram_pkt->getAddr(), 1,
+						dram_pkt->readyTime - dram_pkt->entryTime);
+
+			// remove the request from the queue - the iterator is no longer valid
+			writeQueue[dram_pkt->qosValue()].erase(to_write);
+
+			//accessAndRespond(pkt, frontendLatency);
+        }
+
+        if(erase)
+        	delete dram_pkt;
+
+
+        // If we emptied the write queue, or got sufficiently below the
+        // threshold (using the minWritesPerSwitch as the hysteresis) and
+        // are not draining, or we have reads waiting and have done enough
+        // writes, then switch to reads.
+        bool below_threshold =
+            totalWriteQueueSize + minWritesPerSwitch < writeLowThreshold;
+
+        if (totalWriteQueueSize == 0 ||
+            (below_threshold && drainState() != DrainState::Draining) ||
+            (totalReadQueueSize && writesThisTime >= minWritesPerSwitch)) {
+
+            // turn the bus back around for reads again
+            busStateNext = READ;
+
+            // note that the we switch back to reads also in the idle
+            // case, which eventually will check for any draining and
+            // also pause any further scheduling if there is really
+            // nothing to do
+        }
+    }
+    // It is possible that a refresh to another rank kicks things back into
+    // action before reaching this point.
+    if (!nextReqEvent.scheduled())
+        schedule(nextReqEvent, std::max(nextReqTime, curTick()));
+
+    // If there is space available and we have writes waiting then let
+    // them retry. This is done here to ensure that the retry does not
+    // cause a nextReqEvent to be scheduled before we do so as part of
+    // the next request processing
+    if (retryWrReq && totalWriteQueueSize < writeBufferSize) {
+        retryWrReq = false;
+        port.sendRetryReq();
+    }
+
+}
+
+void
+DRAMCtrl::processNextReqEvent()
+{
+	if(nvm) {
+		processNVMNextReqEvent();
+		try_flush_wb();
+		return;
+	}
+
+    // transition is handled by QoS algorithm if enabled
+    if (turnPolicy) {
+        // select bus state - only done if QoS algorithms are in use
+        busStateNext = selectNextBusState();
+    }
+
+    // detect bus state change
+    bool switched_cmd_type = (busState != busStateNext);
+    // record stats
+    recordTurnaroundStats();
+
+    //DPRINTF(DRAM, "QoS Turnarounds selected state %s %s\n",
+    //        (busState==MemCtrl::READ)?"READ":"WRITE",
+    //        switched_cmd_type?"[turnaround triggered]":"");
+
+    if (switched_cmd_type) {
+        if (busState == READ) {
+            //DPRINTF(DRAM,
+            //        "Switching to writes after %d reads with %d reads "
+            //        "waiting\n", readsThisTime, totalReadQueueSize);
+            rdPerTurnAround.sample(readsThisTime);
+            readsThisTime = 0;
+        } else {
+            //DPRINTF(DRAM,
+            //        "Switching to reads after %d writes with %d writes "
+            //        "waiting\n", writesThisTime, totalWriteQueueSize);
+            wrPerTurnAround.sample(writesThisTime);
+            writesThisTime = 0;
+        }
+    }
+
+    // updates current state
+    busState = busStateNext;
+
+    // check ranks for refresh/wakeup - uses busStateNext, so done after turnaround
+    // decisions
+    int busyRanks = 0;
+    for (auto r : ranks) {
+        if (!r->inRefIdleState()) {
+            if (r->pwrState != PWR_SREF) {
+                // rank is busy refreshing
+                DPRINTF(DRAMState, "Rank %d is not available\n", r->rank);
+                busyRanks++;
+
+                // let the rank know that if it was waiting to drain, it
+                // is now done and ready to proceed
+                r->checkDrainDone();
+            }
+
+            // check if we were in self-refresh and haven't started
+            // to transition out
+            if ((r->pwrState == PWR_SREF) && r->inLowPowerState) {
+                DPRINTF(DRAMState, "Rank %d is in self-refresh\n", r->rank);
+                // if we have commands queued to this rank and we don't have
+                // a minimum number of active commands enqueued,
+                // exit self-refresh
+                if (r->forceSelfRefreshExit()) {
+                    DPRINTF(DRAMState, "rank %d was in self refresh and"
+                           " should wake up\n", r->rank);
+                    //wake up from self-refresh
+                    r->scheduleWakeUpEvent(tXS);
+                    // things are brought back into action once a refresh is
+                    // performed after self-refresh
+                    // continue with selection for other ranks
+                }
+            }
+        }
+    }
+
+    if (busyRanks == ranksPerChannel) {
+        // if all ranks are refreshing wait for them to finish
+        // and stall this state machine without taking any further
+        // action, and do not schedule a new nextReqEvent
+        return;
+    }
+
+    // when we get here it is either a read or a write
+    if (busState == READ) {
+
+        // track if we should switch or not
+        bool switch_to_writes = false;
+
+        if (totalReadQueueSize == 0) {
+            // In the case there is no read request to go next,
+            // trigger writes if we have passed the low threshold (or
+            // if we are draining)
+            if (!(totalWriteQueueSize == 0) &&
+                (drainState() == DrainState::Draining ||
+                 totalWriteQueueSize > writeLowThreshold)) {
+
+                //DPRINTF(DRAM, "Switching to writes due to read queue empty\n");
+                switch_to_writes = true;
+            } else {
+                // check if we are drained
+                // not done draining until in PWR_IDLE state
+                // ensuring all banks are closed and
+                // have exited low power states
+                if (drainState() == DrainState::Draining &&
+                    respQueue.empty() && allRanksDrained()) {
+
+                    DPRINTF(Drain, "DRAM controller done draining\n");
+                    signalDrainDone();
+                }
+
+                // nothing to do, not even any point in scheduling an
+                // event for the next request
+                return;
+            }
+        } else {
+
+            bool read_found = false;
+            DRAMPacketQueue::iterator to_read;
+            uint8_t prio = numPriorities();
+
+            for (auto queue = readQueue.rbegin();
+                 queue != readQueue.rend(); ++queue) {
+
+                prio--;
+
+                DPRINTF(QOS,
+                        "DRAM controller checking READ queue [%d] priority [%d elements]\n",
+                        prio, queue->size());
+
+                // Figure out which read request goes next
+                // If we are changing command type, incorporate the minimum
+                // bus turnaround delay which will be tCS (different rank) case
+                to_read = chooseNext((*queue), switched_cmd_type ? tCS : 0);
+
+                if (to_read != queue->end()) {
+                    // candidate read found
+                    read_found = true;
+                    break;
+                }
+            }
+
+            // if no read to an available rank is found then return
+            // at this point. There could be writes to the available ranks
+            // which are above the required threshold. However, to
+            // avoid adding more complexity to the code, return and wait
+            // for a refresh event to kick things into action again.
+            if (!read_found) {
+                //DPRINTF(DRAM, "No Reads Found - exiting\n");
                 return;
             }
 
@@ -1506,11 +3763,17 @@ DRAMCtrl::processNextReqEvent()
 
             respQueue.push_back(dram_pkt);
 
-            // we have so many writes that we have to transition
-            if (totalWriteQueueSize > writeHighThreshold) {
-                switch_to_writes = true;
-            }
-
+            //if(!reram) {
+				// we have so many writes that we have to transition
+				if (totalWriteQueueSize > writeHighThreshold) {
+					switch_to_writes = true;
+				}
+            //}
+            //else {
+            //	if (totalWriteQueueSize >= 1) {
+            //		switch_to_writes = true;
+            //	}
+            //}
             // remove the request from the queue - the iterator is no longer valid .
             readQueue[dram_pkt->qosValue()].erase(to_read);
         }
@@ -1554,7 +3817,7 @@ DRAMCtrl::processNextReqEvent()
         // avoid adding more complexity to the code, return at this point and
         // wait for a refresh event to kick things into action again.
         if (!write_found) {
-            DPRINTF(DRAM, "No Writes Found - exiting\n");
+            //DPRINTF(DRAM, "No Writes Found - exiting\n");
             return;
         }
 
@@ -1566,38 +3829,76 @@ DRAMCtrl::processNextReqEvent()
 
         doDRAMAccess(dram_pkt);
 
-        // removed write from queue, decrement count
-        --dram_pkt->rankRef.writeEntries;
-
-        // Schedule write done event to decrement event count
-        // after the readyTime has been reached
-        // Only schedule latest write event to minimize events
-        // required; only need to ensure that final event scheduled covers
-        // the time that writes are outstanding and bus is active
-        // to holdoff power-down entry events
-        if (!dram_pkt->rankRef.writeDoneEvent.scheduled()) {
-            schedule(dram_pkt->rankRef.writeDoneEvent, dram_pkt->readyTime);
-            // New event, increment count
+        /*if(reram) {
+            // Every respQueue which will generate an event, increment count
             ++dram_pkt->rankRef.outstandingEvents;
 
-        } else if (dram_pkt->rankRef.writeDoneEvent.when() <
-                   dram_pkt->readyTime) {
+            // sanity check
+            assert(dram_pkt->size <= burstSize);
+            assert(dram_pkt->readyTime >= curTick());
 
-            reschedule(dram_pkt->rankRef.writeDoneEvent, dram_pkt->readyTime);
+            // Insert into response queue. It will be sent back to the
+            // requester at its readyTime
+            if (respQueue.empty()) {
+                assert(!respondEvent.scheduled());
+                schedule(respondEvent, dram_pkt->readyTime);
+            } else {
+                assert(respQueue.back()->readyTime <= dram_pkt->readyTime);
+                assert(respondEvent.scheduled());
+            }
+
+            respQueue.push_back(dram_pkt);
+
+			//isInWriteQueue.erase(burstAlign(dram_pkt->addr));
+			unordered_multiset<Addr>::iterator it = isInWriteQueue.find(burstAlign(dram_pkt->addr));
+			isInWriteQueue.erase(it);
+
+			// log the response
+			logResponse(MemCtrl::WRITE, dram_pkt->masterId(),
+						dram_pkt->qosValue(), dram_pkt->getAddr(), 1,
+						dram_pkt->readyTime - dram_pkt->entryTime);
+
+			// remove the request from the queue - the iterator is no longer valid
+			writeQueue[dram_pkt->qosValue()].erase(to_write);
+
         }
+        else {*/
+			// removed write from queue, decrement count
+			--dram_pkt->rankRef.writeEntries;
 
-        isInWriteQueue.erase(burstAlign(dram_pkt->addr));
+			// Schedule write done event to decrement event count
+			// after the readyTime has been reached
+			// Only schedule latest write event to minimize events
+			// required; only need to ensure that final event scheduled covers
+			// the time that writes are outstanding and bus is active
+			// to holdoff power-down entry events
+			if (!dram_pkt->rankRef.writeDoneEvent.scheduled()) {
+				schedule(dram_pkt->rankRef.writeDoneEvent, dram_pkt->readyTime);
+				// New event, increment count
+				++dram_pkt->rankRef.outstandingEvents;
 
-        // log the response
-        logResponse(MemCtrl::WRITE, dram_pkt->masterId(),
-                    dram_pkt->qosValue(), dram_pkt->getAddr(), 1,
-                    dram_pkt->readyTime - dram_pkt->entryTime);
+			} else if (dram_pkt->rankRef.writeDoneEvent.when() <
+					   dram_pkt->readyTime) {
+
+				reschedule(dram_pkt->rankRef.writeDoneEvent, dram_pkt->readyTime);
+			}
+
+			//isInWriteQueue.erase(burstAlign(dram_pkt->addr));
+			unordered_multiset<Addr>::iterator it = isInWriteQueue.find(burstAlign(dram_pkt->addr));
+			isInWriteQueue.erase(it);
+
+			// log the response
+			logResponse(MemCtrl::WRITE, dram_pkt->masterId(),
+						dram_pkt->qosValue(), dram_pkt->getAddr(), 1,
+						dram_pkt->readyTime - dram_pkt->entryTime);
 
 
-        // remove the request from the queue - the iterator is no longer valid
-        writeQueue[dram_pkt->qosValue()].erase(to_write);
+			// remove the request from the queue - the iterator is no longer valid
+			writeQueue[dram_pkt->qosValue()].erase(to_write);
 
-        delete dram_pkt;
+			//writeResponseQueue.push_back(dram_pkt);
+			delete dram_pkt;
+        //}
 
         // If we emptied the write queue, or got sufficiently below the
         // threshold (using the minWritesPerSwitch as the hysteresis) and
@@ -1606,18 +3907,26 @@ DRAMCtrl::processNextReqEvent()
         bool below_threshold =
             totalWriteQueueSize + minWritesPerSwitch < writeLowThreshold;
 
-        if (totalWriteQueueSize == 0 ||
-            (below_threshold && drainState() != DrainState::Draining) ||
-            (totalReadQueueSize && writesThisTime >= minWritesPerSwitch)) {
+        //if(!reram) {
+			if (totalWriteQueueSize == 0 ||
+				(below_threshold && drainState() != DrainState::Draining) ||
+				(totalReadQueueSize && writesThisTime >= minWritesPerSwitch)) {
 
-            // turn the bus back around for reads again
-            busStateNext = READ;
+				// turn the bus back around for reads again
+				busStateNext = READ;
 
-            // note that the we switch back to reads also in the idle
-            // case, which eventually will check for any draining and
-            // also pause any further scheduling if there is really
-            // nothing to do
-        }
+				// note that the we switch back to reads also in the idle
+				// case, which eventually will check for any draining and
+				// also pause any further scheduling if there is really
+				// nothing to do
+			}
+        //}
+		//else {
+		//	if (totalWriteQueueSize == 0 ||
+		//		(drainState() != DrainState::Draining) ||
+		//		(totalReadQueueSize && writesThisTime >= 1))
+		//		busStateNext = READ;
+		//}
     }
     // It is possible that a refresh to another rank kicks things back into
     // action before reaching this point.
@@ -1795,7 +4104,7 @@ DRAMCtrl::Rank::checkDrainDone()
     // if this rank was waiting to drain it is now able to proceed to
     // precharge
     if (refreshState == REF_DRAIN) {
-        DPRINTF(DRAM, "Refresh drain done, now precharging\n");
+        //DPRINTF(DRAM, "Refresh drain done, now precharging\n");
 
         refreshState = REF_PD_EXIT;
 
@@ -1886,6 +4195,9 @@ DRAMCtrl::Rank::processWriteDoneEvent()
 void
 DRAMCtrl::Rank::processRefreshEvent()
 {
+	//if(nvm)
+	//	return;
+
     // when first preparing the refresh, remember when it was due
     if ((refreshState == REF_IDLE) || (refreshState == REF_SREF_EXIT)) {
         // remember when the refresh is due
@@ -1898,7 +4210,7 @@ DRAMCtrl::Rank::processRefreshEvent()
         // power down and self-refresh are not entered
         ++outstandingEvents;
 
-        DPRINTF(DRAM, "Refresh due\n");
+        //DPRINTF(DRAM, "Refresh due\n");
     }
 
     // let any scheduled read or write to the same rank go ahead,
@@ -1911,7 +4223,7 @@ DRAMCtrl::Rank::processRefreshEvent()
             && (memory.nextReqEvent.scheduled())) {
             // hand control over to the request loop until it is
             // evaluated next
-            DPRINTF(DRAM, "Refresh awaiting draining\n");
+            //DPRINTF(DRAM, "Refresh awaiting draining\n");
 
             return;
         } else {
@@ -1924,7 +4236,7 @@ DRAMCtrl::Rank::processRefreshEvent()
         // if rank was sleeping and we have't started exit process,
         // wake-up for refresh
         if (inLowPowerState) {
-            DPRINTF(DRAM, "Wake Up for refresh\n");
+            //DPRINTF(DRAM, "Wake Up for refresh\n");
             // save state and return after refresh completes
             scheduleWakeUpEvent(memory.tXP);
             return;
@@ -1939,7 +4251,7 @@ DRAMCtrl::Rank::processRefreshEvent()
         if (numBanksActive != 0) {
             // at the moment, we use a precharge all even if there is
             // only a single bank open
-            DPRINTF(DRAM, "Precharging all\n");
+            //DPRINTF(DRAM, "Precharging all\n");
 
             // first determine when we can precharge
             Tick pre_at = curTick();
@@ -1973,7 +4285,7 @@ DRAMCtrl::Rank::processRefreshEvent()
         } else if ((pwrState == PWR_IDLE) && (outstandingEvents == 1))  {
             // Banks are closed, have transitioned to IDLE state, and
             // no outstanding ACT,RD/WR,Auto-PRE sequence scheduled
-            DPRINTF(DRAM, "All banks already precharged, starting refresh\n");
+            //DPRINTF(DRAM, "All banks already precharged, starting refresh\n");
 
             // go ahead and kick the power state machine into gear since
             // we are already idle
@@ -2266,8 +4578,8 @@ DRAMCtrl::Rank::processPowerEvent()
 
         // completed refresh event, ensure next request is scheduled
         if (!memory.nextReqEvent.scheduled()) {
-            DPRINTF(DRAM, "Scheduling next request after refreshing"
-                           " rank %d\n", rank);
+            //DPRINTF(DRAM, "Scheduling next request after refreshing"
+            //               " rank %d\n", rank);
             schedule(memory.nextReqEvent, curTick());
         }
     }
@@ -2405,7 +4717,7 @@ DRAMCtrl::Rank::updatePowerStats()
 void
 DRAMCtrl::Rank::computeStats()
 {
-    DPRINTF(DRAM,"Computing stats due to a dump callback\n");
+    //DPRINTF(DRAM,"Computing stats due to a dump callback\n");
 
     // Update the stats
     updatePowerStats();
@@ -2507,6 +4819,158 @@ DRAMCtrl::regStats()
     }
 
     registerResetCallback(new MemResetCallback(this));
+
+
+
+
+//       MTmsr
+ //       .name("mtmissrate")
+  //      .desc("miss rate mt cache");
+//
+//
+//       MTmisses
+//        .name("mtmisses")
+//       .desc("miss count mt cache");
+
+
+//       MThits
+//        .name("mthits")
+//        .desc("hitcoutn mt cache");
+//
+
+//       CtLife
+//        .name("ctlife")
+//        .desc("miss rate counter cache");
+
+
+//       Ctreadonly
+//        .name("ctreadonly")
+//        .desc("miss rate counter cache");
+
+
+//       Ctmodify
+//        .name("Ctmodify")
+//        .desc("miss rate counter cache");
+
+    llcMissrate
+		.name(name() + ".llcMissrate")
+		.desc("Last Level Cache miss rate");
+
+    numWriteReqs
+        .name(name() + ".numWriteReqs")
+        .desc("Number of write requests sent to NVM");
+
+    bitFlips
+        .name(name() + ".bitFlips")
+        .desc("Number of bit flips");
+
+    avgBitFlipsPerWrite
+        .name(name() + ".avgBitFlipsPerWrite")
+        .desc("Number of average bit flips per write")
+        .precision(2);
+
+    avgBitFlipsPerWrite = bitFlips / (numWriteReqs);
+
+    totalWriteSlots
+        .name(name() + ".totalWriteSlots")
+        .desc("Number of total write slots used to perform a write operation");
+
+    avgWriteSlots
+        .name(name() + ".avgWriteSlots")
+        .desc("Number of average write slots used to perform a write operation")
+        .precision(2);
+
+    avgWriteSlots = totalWriteSlots / (numWriteReqs);
+
+    totalEncryptValSkpd
+        .name(name() + ".totalEncryptValSkpd")
+        .desc("Number of total encrypted values skipped");
+
+    avgEncryptValSkpd
+        .name(name() + ".avgEncryptValSkpd")
+        .desc("Number of average encrypted values skipped")
+        .precision(2);
+
+    avgEncryptValSkpd = totalEncryptValSkpd / (numWriteReqs);
+
+    totalEncryptValTested
+        .name(name() + ".totalEncryptValTested")
+        .desc("Number of total encrypted values tested");
+
+    avgEncryptValTested
+        .name(name() + ".avgEncryptValTested")
+        .desc("Number of average encrypted values tested")
+        .precision(2);
+
+    avgEncryptValTested = totalEncryptValTested / (numWriteReqs);
+
+    numOfTimesTotalCacheLineEncrp
+    	.name(name() + ".numOfTimesTotalCacheLineEncrp")
+        .desc("Number of times total cacheline is encrypted");
+
+    numOfTimesPartialCacheLineEncrp
+		.name(name() + ".numOfTimesPartialCacheLineEncrp")
+		.desc("Number of times partial cacheline is encrypted");
+
+    numCacheLinesWritten
+		.name(name() + ".numCacheLinesWritten")
+		.desc("Number of cache blocks written");
+
+    numCacheLinesWritten_4
+		.name(name() + ".numCacheLinesWritten_4")
+		.desc("Number of cache blocks written");
+
+    numCacheLinesWritten_8
+		.name(name() + ".numCacheLinesWritten_8")
+		.desc("Number of cache blocks written");
+
+    numCacheLinesWritten_16
+		.name(name() + ".numCacheLinesWritten_16")
+		.desc("Number of cache blocks written");
+
+    numCacheLinesWritten_32
+		.name(name() + ".numCacheLinesWritten_32")
+		.desc("Number of cache blocks written");
+
+    numCacheLinesWritten_64
+		.name(name() + ".numCacheLinesWritten_64")
+		.desc("Number of cache blocks written");
+
+    totalModifiedWords
+		.name(name() + ".totalModifiedWords")
+		.desc("Number of total modified words");
+
+    totalCacheLineWrites
+		.name(name() + ".totalCacheLineWrites")
+		.desc("Number of total writes");
+
+    avgModifiedWordsPerWrite
+        .name(name() + ".avgModifiedWordsPerWrite")
+        .desc("Number of average modified words per write")
+        .precision(2);
+
+    avgModifiedWordsPerWrite = totalModifiedWords / (totalCacheLineWrites);
+
+    writesSavedAtCC
+		.name(name() + ".writesSavedAtCC")
+		.desc("Number of writes due to counter cache");
+
+    writesWithOutWordChanges
+		.name(name() + ".writesWithOutWordChanges")
+		.desc("Number of same writes to the memory");
+
+    actualWritesWithOutWordChanges
+		.name(name() + ".actualWritesWithOutWordChanges")
+		.desc("Number of same writes to the memory");
+
+    servicedByWrB
+        .name(name() + ".servicedByWrB")
+        .desc("Number of DRAM read bursts serviced by the write buffer");
+
+    avgWrBLen
+        .name(name() + ".avgWrBLen")
+        .desc("Average write buffer length")
+        .precision(2);
 
     readReqs
         .name(name() + ".readReqs")
@@ -2877,8 +5341,8 @@ DRAMCtrl::drain()
         for (auto r : ranks) {
             // force self-refresh exit, which in turn will issue auto-refresh
             if (r->pwrState == PWR_SREF) {
-                DPRINTF(DRAM,"Rank%d: Forcing self-refresh wakeup in drain\n",
-                        r->rank);
+                //DPRINTF(DRAM,"Rank%d: Forcing self-refresh wakeup in drain\n",
+                //        r->rank);
                 r->scheduleWakeUpEvent(tXS);
             }
         }
@@ -2969,3 +5433,4 @@ DRAMCtrlParams::create()
 {
     return new DRAMCtrl(this);
 }
+

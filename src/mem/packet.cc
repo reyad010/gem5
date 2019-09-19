@@ -91,7 +91,7 @@ MemCmd::commandInfo[] =
     { SET2(IsWrite, IsResponse), InvalidCmd, "WriteResp" },
     /* WritebackDirty */
     { SET5(IsWrite, IsRequest, IsEviction, HasData, FromCache),
-            InvalidCmd, "WritebackDirty" },
+    		InvalidCmd, "WritebackDirty" },
     /* WritebackClean - This allows the upstream cache to writeback a
      * line to the downstream cache without it being considered
      * dirty. */
@@ -438,3 +438,4 @@ Packet::PrintReqState::printObj(Printable *obj)
     printLabels();
     obj->print(os, verbosity, curPrefix());
 }
+

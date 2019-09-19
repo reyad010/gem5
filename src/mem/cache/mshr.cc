@@ -140,13 +140,13 @@ replaceUpgrade(PacketPtr pkt)
 
     if (pkt->cmd == MemCmd::UpgradeReq) {
         pkt->cmd = MemCmd::ReadExReq;
-        DPRINTF(Cache, "Replacing UpgradeReq with ReadExReq\n");
+        //DPRINTF(Cache, "Replacing UpgradeReq with ReadExReq\n");
     } else if (pkt->cmd == MemCmd::SCUpgradeReq) {
         pkt->cmd = MemCmd::SCUpgradeFailReq;
-        DPRINTF(Cache, "Replacing SCUpgradeReq with SCUpgradeFailReq\n");
+        //DPRINTF(Cache, "Replacing SCUpgradeReq with SCUpgradeFailReq\n");
     } else if (pkt->cmd == MemCmd::StoreCondReq) {
         pkt->cmd = MemCmd::StoreCondFailReq;
-        DPRINTF(Cache, "Replacing StoreCondReq with StoreCondFailReq\n");
+        //DPRINTF(Cache, "Replacing StoreCondReq with StoreCondFailReq\n");
     }
 
     if (!has_data) {
@@ -357,7 +357,7 @@ MSHR::allocateTarget(PacketPtr pkt, Tick whenReady, Counter _order,
 bool
 MSHR::handleSnoop(PacketPtr pkt, Counter _order)
 {
-    DPRINTF(Cache, "%s for %s\n", __func__, pkt->print());
+    //DPRINTF(Cache, "%s for %s\n", __func__, pkt->print());
 
     // when we snoop packets the needsWritable and isInvalidate flags
     // should always be the same, however, this assumes that we never
@@ -671,3 +671,4 @@ MSHR::print() const
     print(str);
     return str.str();
 }
+

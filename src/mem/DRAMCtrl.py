@@ -87,11 +87,11 @@ class DRAMCtrl(QoSMemCtrl):
 
     # threshold in percent for when to forcefully trigger writes and
     # start emptying the write buffer
-    write_high_thresh_perc = Param.Percent(85, "Threshold to force writes")
+    write_high_thresh_perc = Param.Percent(15, "Threshold to force writes")
 
     # threshold in percentage for when to start writes if the read
     # queue is empty
-    write_low_thresh_perc = Param.Percent(50, "Threshold to start writes")
+    write_low_thresh_perc = Param.Percent(0, "Threshold to start writes")
 
     # minimum write bursts to schedule before switching back to reads
     min_writes_per_switch = Param.Unsigned(16, "Minimum write bursts before "
@@ -235,6 +235,27 @@ class DRAMCtrl(QoSMemCtrl):
     # time to exit self-refresh mode with locked DLL
     tXSDLL = Param.Latency("0ns", "Self-refresh exit latency DLL")
 
+	# enable encryption
+    enable_encryption = Param.Unsigned(0, "enable encryption")
+    
+    # encryption method
+    encryption_method = Param.Unsigned(0, "method to perform encryption")
+
+	# tsecme encryption threshold
+	#tsecme_encrption_thresh = Param.Unsigned(0, "tsecme encrption threshold")
+	
+    # deuce method
+    deuce_epoch = Param.Unsigned(0, "deuce epoch length")
+
+    # non-volatile memory
+    nvm = Param.Unsigned(0, "emulates nvm")
+    nvm_write_buffer_size = Param.Unsigned(0, "nvm write buffer size")
+    nvm_wb_max_flush_threshold = Param.Unsigned(0, "wb max flush threshold")
+    nvm_wb_min_flush_threshold = Param.Unsigned(0, "wb min flush threshold")
+    bit_flips_delay = Param.Unsigned(0, "delay due to bit flips")
+    reram = Param.Unsigned(0, "reram nvm memory")
+    dynamic_row_remapping = Param.Unsigned(0, "reram nvm memory - dynamic row remapping")
+    
     # Currently rolled into other params
     ######################################################################
 
@@ -385,6 +406,21 @@ class DDR3_1600_8x8(DRAMCtrl):
     # self refresh exit time
     tXS = '270ns'
 
+    enable_encryption = 0
+    # encryption method
+    encryption_method = 0
+	#tsecme_encrption_thresh = 0;
+    deuce_epoch = 0
+
+    # non-volatile memory
+    nvm = 0
+    nvm_write_buffer_size = 0
+    nvm_wb_max_flush_threshold = 0
+    nvm_wb_min_flush_threshold = 0
+    bit_flips_delay = 0;
+    reram = 0;
+    dynamic_row_remapping = 0
+	
     # Current values from datasheet Die Rev E,J
     IDD0 = '55mA'
     IDD2N = '32mA'
@@ -397,6 +433,356 @@ class DDR3_1600_8x8(DRAMCtrl):
     IDD6 = '20mA'
     VDD = '1.5V'
 
+# NVM memory
+class NVM_DDR3_1600_8x8(DDR3_1600_8x8):
+    enable_encryption = 1
+    nvm = 1
+    nvm_write_buffer_size = 32
+    nvm_wb_max_flush_threshold = 30
+    nvm_wb_min_flush_threshold = 6
+    bit_flips_delay = 1
+    reram = 0
+    dynamic_row_remapping = 0
+	
+    tRCD = '60ns'
+    tWR = '160ns'
+
+# ReRAM
+class NVM_ReRAM(NVM_DDR3_1600_8x8):
+    enable_encryption = 0
+    bit_flips_delay = 0
+    nvm = 0
+    nvm_write_buffer_size = 0
+    nvm_wb_max_flush_threshold = 0
+    nvm_wb_min_flush_threshold = 0
+
+    reram = 1
+    dynamic_row_remapping = 0
+
+    write_buffer_size = 8
+    read_buffer_size = 8
+    min_writes_per_switch = 1
+
+    tRCD = '18ns'
+    tWR = '50ns'
+	
+# ReRAM
+class NVM_ReRAM1(NVM_DDR3_1600_8x8):
+    enable_encryption = 0
+    bit_flips_delay = 0
+    nvm = 0
+    nvm_write_buffer_size = 0
+    nvm_wb_max_flush_threshold = 0
+    nvm_wb_min_flush_threshold = 0    
+    reram = 1
+    dynamic_row_remapping = 1
+	
+    tRCD = '18ns'
+    tWR = '50ns'
+	
+# DCW without encryption
+class NVM_DCW(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 0
+
+# DCW with encryption
+class NVM_DCWECRPT(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 1
+
+# FNW without encryption
+class NVM_FNW(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 2
+
+# FNW with encryption
+class NVM_FNWECRPT(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 3
+
+# With TSECME encryption
+class NVM_TSECME(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 4
+    #tsecme_encrption_thresh = 200
+
+# With TSECME1 encryption
+class NVM_TSECME1(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 5
+
+# With TSECME1 encryption
+class NVM_TSECME2(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 6
+
+# With TSECME1 encryption
+class NVM_TSECME3(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 7
+
+# With TSECME1 encryption
+class NVM_TSECME4(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 8
+
+# With TSECME1 encryption
+class NVM_TSECME5(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 14
+
+# With TSECME1 encryption
+class NVM_TSECME6(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 15
+
+# With PSECME encryption
+class NVM_DEUCE_4(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 9
+    deuce_epoch = 4
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME_4(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 10
+    deuce_epoch = 4
+
+# With PSECME encryption
+class NVM_DEUCE_8(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 9
+    deuce_epoch = 8
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME_8(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 10
+    deuce_epoch = 8
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME1_8(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 11
+    deuce_epoch = 8
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME2_8(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 12
+    deuce_epoch = 8
+
+# With PSECME encryption
+class NVM_DEUCE_16(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 9
+    deuce_epoch = 16
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME_16(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 10
+    deuce_epoch = 16
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME1_16(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 11
+    deuce_epoch = 16
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME2_16(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 12
+    deuce_epoch = 16
+
+# With PSECME encryption
+class NVM_DEUCE_32(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 9
+    deuce_epoch = 32
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME_32(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 10
+    deuce_epoch = 32
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME1_32(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 11
+    deuce_epoch = 32
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME2_32(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 12
+    deuce_epoch = 32
+
+# With PSECME encryption
+class NVM_DEUCE_64(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 9
+    deuce_epoch = 64
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME_64(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 10
+    deuce_epoch = 64
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME1_64(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 11
+    deuce_epoch = 64
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME2_64(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 12
+    deuce_epoch = 64
+
+# With PSECME encryption
+class NVM_DEUCE_128(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 9
+    deuce_epoch = 128
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME_128(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 10
+    deuce_epoch = 128
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME1_128(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 11
+    deuce_epoch = 128
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME2_128(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 12
+    deuce_epoch = 128
+
+# With PSECME encryption
+class NVM_DEUCE_256(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 9
+    deuce_epoch = 256
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME_256(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 10
+    deuce_epoch = 256
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME1_256(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 11
+    deuce_epoch = 256
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME2_256(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 12
+    deuce_epoch = 256
+
+# With PSECME encryption
+class NVM_DEUCE1_256(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 13
+    deuce_epoch = 256
+
+# With PSECME encryption
+class NVM_DEUCE1_128(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 13
+    deuce_epoch = 128
+
+# With PSECME encryption
+class NVM_DEUCE_512(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 9
+    deuce_epoch = 512
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME_512(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 10
+    deuce_epoch = 512
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME1_512(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 11
+    deuce_epoch = 512
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME2_512(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 12
+    deuce_epoch = 512
+
+# With PSECME encryption
+class NVM_DEUCE1_512(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 13
+    deuce_epoch = 512
+
+# With PSECME encryption
+class NVM_DEUCE_1024(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 9
+    deuce_epoch = 1024
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME_1024(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 10
+    deuce_epoch = 1024
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME1_1024(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 11
+    deuce_epoch = 1024
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME2_1024(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 12
+    deuce_epoch = 1024
+
+# With PSECME encryption
+class NVM_DEUCE_2048(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 9
+    deuce_epoch = 2048
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME_2048(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 10
+    deuce_epoch = 2048
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME1_2048(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 11
+    deuce_epoch = 2048
+
+# With PSECME encryption
+class NVM_DEUCE_TSECME2_2048(NVM_DDR3_1600_8x8):
+    # encryption method
+    encryption_method = 12
+    deuce_epoch = 2048
+
+    
 # A single HMC-2500 x32 model based on:
 # [1] DRAMSpec: a high-level DRAM bank modelling tool
 # developed at the University of Kaiserslautern. This high level tool

@@ -58,6 +58,10 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <map>
+#include <random>
+#include <boost/multiprecision/cpp_int.hpp>
+#include <boost/random.hpp>
 
 #include "base/callback.hh"
 #include "base/statistics.hh"
@@ -95,6 +99,10 @@
  * similar to that described in "Optimized Active and Power-Down Mode
  * Refresh Control in 3D-DRAMs" by Jung et al, VLSI-SoC, 2014.
  */
+
+using namespace boost::multiprecision;
+using namespace boost::random;
+
 class DRAMCtrl : public QoS::MemCtrl
 {
 
@@ -642,7 +650,8 @@ class DRAMCtrl : public QoS::MemCtrl
         Tick readyTime;
 
         /** This comes from the outside world */
-        const PacketPtr pkt;
+        //const PacketPtr pkt;
+        PacketPtr pkt;
 
         /** MasterID associated with the packet */
         const MasterID _masterId;
@@ -687,6 +696,11 @@ class DRAMCtrl : public QoS::MemCtrl
          * QoS value of the encapsulated packet read at queuing time
          */
         uint8_t _qosValue;
+
+        /**
+         *	delay due to bit flips
+         */
+        Tick dly_due_to_bit_flips;
 
         /**
          * Set the packet QoS value
@@ -753,6 +767,17 @@ class DRAMCtrl : public QoS::MemCtrl
      * processRespondEvent is called; no parameters are allowed
      * in these methods
      */
+    void processSendPacketEvent();
+    EventFunctionWrapper XbarSendPacketEvent;
+
+    void processFakeEvent();
+    EventFunctionWrapper XbarFakeEvent;
+
+    Tick getDelayDueToBitFlips(PacketPtr pkt);
+    void insertEntryNVMWriteBuffer(DRAMPacket *dram_pkt);
+    void eraseEntryNVMWriteBuffer(DRAMPacket *dram_pkt);
+    void try_flush_wb();
+    void processNVMNextReqEvent();
     void processNextReqEvent();
     EventFunctionWrapper nextReqEvent;
 
@@ -934,7 +959,48 @@ class DRAMCtrl : public QoS::MemCtrl
      * location we never have more than one address to the same burst
      * address.
      */
-    std::unordered_set<Addr> isInWriteQueue;
+    //std::unordered_set<Addr> isInWriteQueue;
+    std::unordered_multiset<Addr> isInWriteQueue;
+
+    /*
+     * Enable Non-Volatile Memory
+     */
+    uint32_t nvm;
+
+    /*
+     * Non-Volatile Memory Write Buffer size
+     */
+    uint32_t nvm_write_buffer_size;
+
+    uint64_t nvm_totalWriteBufferSize;
+
+    bool nvm_wb_flushing;
+
+    uint64_t nvm_wb_max_threshold;
+
+    uint64_t nvm_wb_min_threshold;
+
+    /**
+     * The controller's write buffer for NVM
+     */
+    DRAMPacketQueue writeBuffer;
+
+    uint32_t reram;
+
+    uint32_t dynamicRowReMapping;
+
+    uint32_t enableEncryption;
+
+    uint32_t bitFlipsDelay;
+
+    /**
+     * To avoid iterating over the write buffer to check for
+     * overlapping transactions, maintain a set of burst addresses
+     * that are currently queued. Since we merge writes to the same
+     * location we never have more than one address to the same burst
+     * address.
+     */
+    std::unordered_set<Addr> isInWriteBuffer;
 
     /**
      * Response queue where read packets wait after we're done working
@@ -950,6 +1016,22 @@ class DRAMCtrl : public QoS::MemCtrl
      * Vector of ranks
      */
     std::vector<Rank*> ranks;
+
+    /*
+     * Random value for encryption
+     */
+    typedef independent_bits_engine<mt19937, 512, uint512_t> generator512_type;
+    generator512_type gen512;
+    typedef independent_bits_engine<mt19937, 256, uint256_t> generator256_type;
+    generator256_type gen256;
+    typedef independent_bits_engine<mt19937, 128, uint128_t> generator128_type;
+	generator128_type gen128;
+    typedef independent_bits_engine<mt19937, 64, uint64_t> generator64_type;
+	generator64_type gen64;
+	typedef independent_bits_engine<mt19937, 32, uint32_t> generator32_type;
+	generator32_type gen32;
+	typedef independent_bits_engine<mt19937, 16, uint16_t> generator16_type;
+	generator16_type gen16;
 
     /**
      * The following are basic design parameters of the memory
@@ -1052,6 +1134,34 @@ class DRAMCtrl : public QoS::MemCtrl
     Tick nextReqTime;
 
     // All statistics that the model needs to capture
+
+    Stats::Scalar llcMissrate;
+
+    Stats::Scalar bitFlips;
+    Stats::Formula avgBitFlipsPerWrite;
+    Stats::Scalar totalWriteSlots;
+    Stats::Formula avgWriteSlots;
+    Stats::Scalar totalEncryptValSkpd;
+    Stats::Formula avgEncryptValSkpd;
+    Stats::Scalar totalEncryptValTested;
+    Stats::Formula avgEncryptValTested;
+    Stats::Scalar numOfTimesTotalCacheLineEncrp;
+    Stats::Scalar numOfTimesPartialCacheLineEncrp;
+    Stats::Scalar numCacheLinesWritten;
+    Stats::Scalar numCacheLinesWritten_4;
+    Stats::Scalar numCacheLinesWritten_8;
+    Stats::Scalar numCacheLinesWritten_16;
+    Stats::Scalar numCacheLinesWritten_32;
+    Stats::Scalar numCacheLinesWritten_64;
+    Stats::Scalar totalModifiedWords;
+    Stats::Scalar totalCacheLineWrites;
+    Stats::Formula avgModifiedWordsPerWrite;
+    Stats::Scalar writesSavedAtCC;
+    Stats::Scalar writesWithOutWordChanges;
+    Stats::Scalar actualWritesWithOutWordChanges;
+    Stats::Scalar numWriteReqs;
+
+
     Stats::Scalar readReqs;
     Stats::Scalar writeReqs;
     Stats::Scalar readBursts;
@@ -1062,6 +1172,7 @@ class DRAMCtrl : public QoS::MemCtrl
     Stats::Scalar bytesReadSys;
     Stats::Scalar bytesWrittenSys;
     Stats::Scalar servicedByWrQ;
+    Stats::Scalar servicedByWrB;
     Stats::Scalar mergedWrBursts;
     Stats::Scalar neitherReadNorWrite;
     Stats::Vector perBankRdBursts;
@@ -1120,6 +1231,7 @@ class DRAMCtrl : public QoS::MemCtrl
     // Average queue lengths
     Stats::Average avgRdQLen;
     Stats::Average avgWrQLen;
+    Stats::Average avgWrBLen;
 
     // Row hit count and rate
     Stats::Scalar readRowHits;
@@ -1139,6 +1251,10 @@ class DRAMCtrl : public QoS::MemCtrl
 
     /** The time when stats were last reset used to calculate average power */
     Tick lastStatsResetTick;
+
+    uint64_t encryptionMethod;
+    uint64_t tsecme_encrption_thresh;
+    uint64_t deuce_epoch;
 
     /**
      * Upstream caches need this packet until true is returned, so
@@ -1170,6 +1286,8 @@ class DRAMCtrl : public QoS::MemCtrl
 
   public:
 
+
+
     void regStats() override;
 
     DRAMCtrl(const DRAMCtrlParams* p);
@@ -1182,7 +1300,26 @@ class DRAMCtrl : public QoS::MemCtrl
     virtual void init() override;
     virtual void startup() override;
     virtual void drainResume() override;
-
+/*Stats::Scalar MTmsr;
+Stats::Scalar MTmisses;
+Stats::Scalar MThits;
+Stats::Scalar CtLife;
+Stats::Scalar Ctreadonly;
+Stats::Scalar Ctmodify;
+    Stats::Scalar CacheMissRate;
+    Stats::Scalar mtmissrate;
+    Stats::Scalar MTshadowCount;
+    Stats::Scalar CTRshadow;
+    Stats::Scalar CTROverflow;
+    Stats::Scalar L1Overflow;
+    Stats::Scalar L2Overflow;
+    Stats::Scalar L3Overflow;
+    Stats::Scalar L4Overflow;
+    Stats::Scalar L5Overflow;
+    Stats::Scalar L6Overflow;
+    Stats::Scalar L7Overflow;
+    Stats::Scalar L8Overflow;
+*/
     /**
      * Return true once refresh is complete for all ranks and there are no
      * additional commands enqueued.  (only evaluated when draining)
@@ -1199,7 +1336,12 @@ class DRAMCtrl : public QoS::MemCtrl
     Tick recvAtomic(PacketPtr pkt);
     void recvFunctional(PacketPtr pkt);
     bool recvTimingReq(PacketPtr pkt);
+    bool actualRcvTiming(PacketPtr pkt);
+    void sendDummyRead();
+    void sendDummyWrite();
+    void sendDummyWrite(uint64_t extra_latency);
 
 };
 
 #endif //__MEM_DRAM_CTRL_HH__
+

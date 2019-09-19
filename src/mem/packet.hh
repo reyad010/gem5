@@ -379,6 +379,8 @@ class Packet : public Printable
      */
     uint32_t payloadDelay;
 
+    uint64_t dlyDueToBitFips;
+
     /**
      * A virtual base opaque structure used to hold state associated
      * with the packet (e.g., an MSHR), specific to a MemObject that
@@ -782,6 +784,9 @@ class Packet : public Printable
             size = req->getSize();
             flags.set(VALID_SIZE);
         }
+
+        for(int i=0; i<32; i++)
+			modifiedWordsFlag[i] = 0;
     }
 
     /**
@@ -802,6 +807,9 @@ class Packet : public Printable
         }
         size = _blkSize;
         flags.set(VALID_SIZE);
+
+        for(int i=0; i<32; i++)
+        	modifiedWordsFlag[i] = 0;
     }
 
     /**
@@ -842,6 +850,9 @@ class Packet : public Printable
                 allocate();
             }
         }
+
+        for(int i=0; i<32; i++)
+			modifiedWordsFlag[i] = pkt->modifiedWordsFlag[i];
     }
 
     /**
@@ -1171,6 +1182,61 @@ class Packet : public Printable
         }
     }
 
+    bool modifiedWordsFlag[32];
+
+    /** set modified Words Flag*/
+    void
+    setModifiedWordsFlagFromBlock(bool *mwf) {
+    	for(int i=0; i<32; i++) {
+    		modifiedWordsFlag[i] = mwf[i];
+    	}
+    	//std::cout << "setModifiedWordsFlagFromBlock" << std::endl;
+    }
+
+    void
+    setModifiedWordsFlagInBlock(bool *mwf) {
+    	for(int i=0; i<32; i++) {
+    		mwf[i] = modifiedWordsFlag[i];
+    	}
+    	//std::cout << "setModifiedWordsFlagInBlock" << std::endl;
+    }
+
+    void
+    writeModifiedWordsFlagToBlock(uint8_t *blk_data, int blkSize, bool *mwf)
+    {
+    	//std::vector<uint16_t> pkt_data_words(getSize());
+    	//std::vector<uint16_t> blk_data_words(getSize());
+
+    	//std::memcpy(&blk_data_words[0], blk_data + getOffset(blkSize), getSize());
+    	//std::memcpy(&pkt_data_words[0], getConstPtr<uint8_t>(), getSize());
+
+    	int word = getOffset(64)/2;
+		for (int i=0; i<getSize()/2; i++){
+			mwf[word] = 1;
+			word++;
+		}
+
+		//std::cout << "address: " << getBlockAddr(64) <<"("<< getAddr()<<")"<<"("<< getOffset(64)<<")"<<"("<< getSize()<<")";
+		//for (int i=0; i<32; i++) {
+		//	std::cout << ":" << mwf[i];
+		//}
+		//std::cout << "" << std::endl;
+		//std::cout << "address: " << getBlockAddr(64) <<"("<< getAddr()<<")"<<"("<< getOffset(64)<<")"<<"("<< getSize()<<")";
+		//for (int i=0; i<32; i++) {
+		//	std::cout << ":" << blk_data_words[i] << "-" << pkt_data_words[i];
+		//}
+		//std::cout << "" << std::endl;
+    	//std::cout << "writeModifiedWordsFlagToBlock" << std::endl;
+    }
+
+    /** Clear Modified Words Flag*/
+    void
+    clearModifiedWordsFlag() {
+    	for(int i=0; i<32; i++)
+    		modifiedWordsFlag[i] = 1;
+    	//std::cout << "clearModifiedWordsFlag" << std::endl;
+    }
+
     /** @} */
 
   private: // Private data accessor methods
@@ -1267,3 +1333,4 @@ class Packet : public Printable
 };
 
 #endif //__MEM_PACKET_HH
+

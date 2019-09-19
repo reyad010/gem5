@@ -1020,7 +1020,7 @@ class BaseCache : public MemObject
         WriteQueueEntry *wq_entry =
             writeBuffer.findMatch(blk_addr, pkt->isSecure());
         if (wq_entry && !wq_entry->inService) {
-            DPRINTF(Cache, "Potential to merge writeback %s", pkt->print());
+            //DPRINTF(Cache, "Potential to merge writeback %s", pkt->print());
         }
 
         writeBuffer.allocate(blk_addr, blkSize, pkt, time, order++);
@@ -1055,7 +1055,7 @@ class BaseCache : public MemObject
             cpuSidePort.setBlocked();
         }
         blocked |= flag;
-        DPRINTF(Cache,"Blocking for cause %d, mask=%d\n", cause, blocked);
+        //DPRINTF(Cache,"Blocking for cause %d, mask=%d\n", cause, blocked);
     }
 
     /**
@@ -1069,7 +1069,7 @@ class BaseCache : public MemObject
     {
         uint8_t flag = 1 << cause;
         blocked &= ~flag;
-        DPRINTF(Cache,"Unblocking for cause %d, mask=%d\n", cause, blocked);
+        //DPRINTF(Cache,"Unblocking for cause %d, mask=%d\n", cause, blocked);
         if (blocked == 0) {
             blocked_cycles[cause] += curCycle() - blockedCycle;
             cpuSidePort.clearBlocked();
@@ -1159,3 +1159,4 @@ class BaseCache : public MemObject
 };
 
 #endif //__MEM_CACHE_BASE_HH__
+

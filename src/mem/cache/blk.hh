@@ -123,6 +123,8 @@ class CacheBlk : public ReplaceableEntry
     /** Tick on which the block was inserted in the cache. */
     Tick tickInserted;
 
+    bool wordsModifiedFlags[32];
+
   protected:
     /**
      * Represents that the indicated thread context has a "lock" on

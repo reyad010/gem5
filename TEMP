@@ -1,0 +1,27 @@
+no of set 256
+initializing cache: no of sets 512
+MT levels 8.33333
+fl nodes524288
+trying i = 0
+trying i = 1
+trying i = 2
+trying i = 3
+trying i = 4
+trying i = 5
+trying i = 6
+trying i = 7
+subtree 2 nodes 599187 levels 8
+nodes per set 1171
+gem5 Simulator System.  http://gem5.org
+gem5 is copyrighted software; use the --copyright option for details.
+
+gem5 compiled Dec 14 2018 13:19:50
+gem5 started Dec 14 2018 13:39:39
+gem5 executing on user-Super-Server, pid 5399
+command line: build/X86/gem5.opt configs/example/fs.py --disk-image=/home/RESEARCH/GEM5/fs_x86/disks/ubuntu-16.04_FSENCRYPT_WHISPER.img --kernel=/home/RESEARCH/GEM5/fs_x86/binaries/VMLINUX_FSENCRYPT --mem-size=16GB --cpu-type=AtomicSimpleCPU --mem-type=DDR4_2400_4x16 --l3cache --caches -n 8
+
+Global frequency set at 1000000000000 ticks per second
+      0: rtc: Real-time clock set to Sun Jan  1 00:00:00 2012
+**** REAL SIMULATION ****
+8071925591500: system.pc.com_1.devic15229841837000: system.pc.com_1.device: attach terminal 0
+15508081158000: system.pc.com_1.device: detach terminal 0

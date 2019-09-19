@@ -212,16 +212,29 @@ PhysicalMemory::createBackingStore(AddrRange range,
               range.to_string());
     }
 
+    uint8_t* pmemEncrypt = (uint8_t*) mmap(NULL, range.size(),
+                                    PROT_READ | PROT_WRITE,
+                                    map_flags, -1, 0);
+
+    if (pmemEncrypt == (uint8_t*) MAP_FAILED) {
+        perror("mmap");
+        fatal("Could not mmap %d bytes for range %s!\n", range.size(),
+              range.to_string());
+    }
+
     // remember this backing store so we can checkpoint it and unmap
     // it appropriately
     backingStore.emplace_back(range, pmem,
+                              conf_table_reported, in_addr_map, kvm_map);
+
+    backingStore.emplace_back(range, pmemEncrypt,
                               conf_table_reported, in_addr_map, kvm_map);
 
     // point the memories to their backing store
     for (const auto& m : _memories) {
         DPRINTF(AddrRanges, "Mapping memory %s to backing store\n",
                 m->name());
-        m->setBackingStore(pmem);
+        m->setBackingStore(pmem,pmemEncrypt);
     }
 }
 
@@ -454,3 +467,4 @@ PhysicalMemory::unserializeStore(CheckpointIn &cp)
         fatal("Close failed on physical memory checkpoint file '%s'\n",
               filename);
 }
+

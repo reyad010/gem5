@@ -227,8 +227,8 @@ BaseCache::handleTimingReqHit(PacketPtr pkt, CacheBlk *blk, Tick request_time)
         // by access(), that calls accessBlock() function.
         cpuSidePort.schedTimingResp(pkt, request_time, true);
     } else {
-        DPRINTF(Cache, "%s satisfied %s, no response needed\n", __func__,
-                pkt->print());
+        //DPRINTF(Cache, "%s satisfied %s, no response needed\n", __func__,
+        //        pkt->print());
 
         // queue the packet for deletion, as the sending cache is
         // still relying on it; if the block is found in access(),
@@ -264,8 +264,8 @@ BaseCache::handleTimingReqMiss(PacketPtr pkt, MSHR *mshr, CacheBlk *blk,
                 // uncached memory write, forwarded to WriteBuffer.
                 allocateWriteBuffer(pkt, forward_time);
             } else {
-                DPRINTF(Cache, "%s coalescing MSHR for %s\n", __func__,
-                        pkt->print());
+                //DPRINTF(Cache, "%s coalescing MSHR for %s\n", __func__,
+                //        pkt->print());
 
                 assert(pkt->req->masterId() < system->maxMasters());
                 mshr_hits[pkt->cmdToIndex()][pkt->req->masterId()]++;
@@ -429,18 +429,21 @@ BaseCache::recvTimingResp(PacketPtr pkt)
     const bool is_error = pkt->isError();
 
     if (is_error) {
-        DPRINTF(Cache, "%s: Cache received %s with error\n", __func__,
-                pkt->print());
+        //DPRINTF(Cache, "%s: Cache received %s with error\n", __func__,
+        //        pkt->print());
     }
 
-    DPRINTF(Cache, "%s: Handling response %s\n", __func__,
-            pkt->print());
+    //DPRINTF(Cache, "%s: Handling response %s\n", __func__,
+    //        pkt->print());
 
     // if this is a write, we should be looking at an uncacheable
     // write
     if (pkt->isWrite()) {
         assert(pkt->req->isUncacheable());
+        //if(pkt->req->isUncacheable())
         handleUncacheableWriteResp(pkt);
+        //else
+        //DPRINTF(Cache, "recvTimingResp write response %s\n",pkt->getBlockAddr(blkSize));
         return;
     }
 
@@ -478,8 +481,8 @@ BaseCache::recvTimingResp(PacketPtr pkt)
     CacheBlk *blk = tags->findBlock(pkt->getAddr(), pkt->isSecure());
 
     if (is_fill && !is_error) {
-        DPRINTF(Cache, "Block for addr %#llx being updated in Cache\n",
-                pkt->getAddr());
+        //DPRINTF(Cache, "Block for addr %#llx being updated in Cache\n",
+        //        pkt->getAddr());
 
         blk = handleFill(pkt, blk, writebacks, mshr->allocOnFill());
         assert(blk != nullptr);
@@ -558,8 +561,8 @@ BaseCache::recvAtomic(PacketPtr pkt)
     // above us is responding
     if (pkt->cacheResponding() && !pkt->isClean()) {
         assert(!pkt->req->isCacheInvalidate());
-        DPRINTF(Cache, "Cache above responding to %s: not responding\n",
-                pkt->print());
+        //DPRINTF(Cache, "Cache above responding to %s: not responding\n",
+        //        pkt->print());
 
         // if a cache is responding, and it had the line in Owned
         // rather than Modified state, we need to invalidate any
@@ -864,7 +867,58 @@ BaseCache::satisfyRequest(PacketPtr pkt, CacheBlk *blk, bool, bool)
         assert(blk->isWritable());
         // Write or WriteLine at the first cache with block in writable state
         if (blk->checkWrite(pkt)) {
-            pkt->writeDataToBlock(blk->data, blkSize);
+        	pkt->writeModifiedWordsFlagToBlock(blk->data,blkSize,blk->wordsModifiedFlags);
+        	/*std::string buffer;
+			buffer.append("address: "); buffer.append(std::to_string(pkt->getBlockAddr(blkSize)));
+			for(int i=0; i<32; i++) {buffer.append(":");buffer.append(std::to_string(blk->wordsModifiedFlags[i]));}buffer.append(" blk->tag: ");buffer.append(std::to_string(blk->tag));
+			buffer.append(" satisfyRequest: write: writeModifiedWordsFlagToBlock");
+			DPRINTF(Cache, "%s\n", buffer);
+			std::string buffer1;
+			std::string buffer2;
+			std::string buffer3;
+			buffer1.append("address: "); buffer1.append(std::to_string(pkt->getBlockAddr(blkSize)));
+			buffer1.append("(");buffer1.append(std::to_string(pkt->getAddr()));buffer1.append(")");
+	    	std::vector<uint8_t> pkt_data_words(pkt->getSize());
+	    	pkt->writeData(&pkt_data_words[0]);
+	    	for (int i=0; i<pkt->getSize(); i++) {
+				buffer1.append(":");
+				buffer1.append(std::to_string(pkt_data_words[i]));
+			}
+	    	//cout << buffer1 << endl;
+	    	DPRINTF(Cache, "%s\n", buffer1);
+			buffer2.append("address: "); buffer2.append(std::to_string(pkt->getBlockAddr(blkSize)));
+			buffer2.append("(");buffer2.append(std::to_string(pkt->getAddr()));buffer2.append(")");
+			buffer2.append("(");buffer2.append(std::to_string(pkt->getOffset(blkSize)));buffer2.append(")");
+	    	std::vector<uint8_t> blk_data_words(blkSize);
+	    	std::memcpy(&blk_data_words[0], blk->data, blkSize);
+	    	for (int i=0; i<blkSize; i++) {
+				buffer2.append(":");
+				buffer2.append(std::to_string(blk_data_words[i]));
+			}
+	    	//cout << buffer2 << endl;
+	    	DPRINTF(Cache, "%s\n", buffer2);
+			//buffer1.append(" satisfyRequest: write: writeModifiedWordsFlagToBlock");
+
+			//cout << "address: " << pkt->getBlockAddr(getSize()) <<"("<< pkt->getAddr()<<")"<<"("<< getSize()<<")";
+			//cout << buffer1 << endl;
+	    	//DPRINTF(Cache,"blk: %x\n",(uint512_t)(blk->data));
+	    	//DPRINTF(Cache,"pkt: %x\n",(uint512_t)(pkt));
+        	//cout << "address: " << pkt->getBlockAddr(blkSize); for(int i=0; i<32; i++) cout << ":"<<blk->wordsModifiedFlags[i]; cout<<" blk->tag: " << blk->tag << " satisfyRequest: writeModifiedWordsFlagToBlock"<<endl;
+			*/
+        	pkt->writeDataToBlock(blk->data, blkSize);
+			/*buffer3.append("address: "); buffer3.append(std::to_string(pkt->getBlockAddr(blkSize)));
+			buffer3.append("(");buffer3.append(std::to_string(pkt->getAddr()));buffer3.append(")");
+			buffer3.append("(");buffer3.append(std::to_string(pkt->getOffset(blkSize)));buffer3.append(")");
+            std::vector<uint8_t> blk_data_words1(blkSize);
+			std::memcpy(&blk_data_words1[0], blk->data, blkSize);
+			for (int i=0; i<blkSize; i++) {
+				buffer3.append(":");
+				buffer3.append(std::to_string(blk_data_words1[i]));
+			}
+			//buffer1.append(" satisfyRequest: write: writeModifiedWordsFlagToBlock");
+			//cout << buffer3 << endl;
+			DPRINTF(Cache, "%s\n", buffer3);
+			*/
         }
         // Always mark the line as dirty (and thus transition to the
         // Modified state) even if we are a failed StoreCond so we
@@ -880,6 +934,15 @@ BaseCache::satisfyRequest(PacketPtr pkt, CacheBlk *blk, bool, bool)
         // all read responses have a data payload
         assert(pkt->hasRespData());
         pkt->setDataFromBlock(blk->data, blkSize);
+        pkt->setModifiedWordsFlagFromBlock(blk->wordsModifiedFlags);
+        //std::ostringstream s;
+        //s << "address: " << pkt->getBlockAddr(blkSize); for(int i=0; i<32; i++) s << ":"<<blk->wordsModifiedFlags[i]; s <<" blk->tag: " << blk->tag << " satisfyRequest: writeModifiedWordsFlagToBlock"<<endl;
+        //std::string buffer(s.str());
+        //std::string buffer;
+		//buffer.append("address: "); buffer.append(std::to_string(pkt->getBlockAddr(blkSize)));
+        //for(int i=0; i<32; i++) {buffer.append(":");buffer.append(std::to_string(blk->wordsModifiedFlags[i]));}buffer.append(" blk->tag: ");buffer.append(std::to_string(blk->tag));
+        //buffer.append(" satisfyRequest: read: setModifiedWordsFlagFromBlock");
+        //DPRINTF(Cache, "%s\n", buffer);
     } else if (pkt->isUpgrade()) {
         // sanity check
         assert(!pkt->hasSharers());
@@ -922,8 +985,8 @@ BaseCache::access(PacketPtr pkt, CacheBlk *&blk, Cycles &lat,
     // that can modify its value.
     blk = tags->accessBlock(pkt->getAddr(), pkt->isSecure(), lat);
 
-    DPRINTF(Cache, "%s for %s %s\n", __func__, pkt->print(),
-            blk ? "hit " + blk->print() : "miss");
+    //DPRINTF(Cache, "%s for %s %s\n", __func__, pkt->print(),
+    //        blk ? "hit " + blk->print() : "miss");
 
     if (pkt->req->isCacheMaintenance()) {
         // A cache maintenance operation is always forwarded to the
@@ -984,8 +1047,8 @@ BaseCache::access(PacketPtr pkt, CacheBlk *&blk, Cycles &lat,
         // any ordering/decisions about ownership already taken
         if (pkt->cmd == MemCmd::WritebackClean &&
             mshrQueue.findMatch(pkt->getAddr(), pkt->isSecure())) {
-            DPRINTF(Cache, "Clean writeback %#llx to block with MSHR, "
-                    "dropping\n", pkt->getAddr());
+            //DPRINTF(Cache, "Clean writeback %#llx to block with MSHR, "
+            //        "dropping\n", pkt->getAddr());
             return true;
         }
 
@@ -1014,8 +1077,17 @@ BaseCache::access(PacketPtr pkt, CacheBlk *&blk, Cycles &lat,
         }
         // nothing else to do; writeback doesn't expect response
         assert(!pkt->needsResponse());
+        //pkt->writeModifiedWordsFlagToBlock(blk->data,blkSize,blk->wordsModifiedFlags);
+        pkt->setModifiedWordsFlagInBlock(blk->wordsModifiedFlags);
+        //std::string buffer;
+		//buffer.append("address: "); buffer.append(std::to_string(pkt->getBlockAddr(blkSize)));
+		//for(int i=0; i<32; i++) {buffer.append(":");buffer.append(std::to_string(blk->wordsModifiedFlags[i]));}buffer.append(" blk->tag: ");buffer.append(std::to_string(blk->tag));
+		//buffer.append(" access: writeback: setModifiedWordsFlagInBlock");
+		//DPRINTF(Cache, "%s\n", buffer);
+
+        //cout << "address: " << pkt->getBlockAddr(blkSize); for(int i=0; i<32; i++) cout << ":"<<blk->wordsModifiedFlags[i]; cout<<" blk->tag: " << blk->tag << " access: writeModifiedWordsFlagToBlock"<<endl;
         pkt->writeDataToBlock(blk->data, blkSize);
-        DPRINTF(Cache, "%s new state is %s\n", __func__, blk->print());
+        //DPRINTF(Cache, "%s new state is %s\n", __func__, blk->print());
         incHitCount(pkt);
         // populate the time when the block will be ready to access.
         blk->whenReady = clockEdge(fillLatency) + pkt->headerDelay +
@@ -1070,8 +1142,16 @@ BaseCache::access(PacketPtr pkt, CacheBlk *&blk, Cycles &lat,
         }
         // nothing else to do; writeback doesn't expect response
         assert(!pkt->needsResponse());
+        //pkt->writeModifiedWordsFlagToBlock(blk->data,blkSize,blk->wordsModifiedFlags);
+        pkt->setModifiedWordsFlagInBlock(blk->wordsModifiedFlags);
+        //std::string buffer;
+		//buffer.append("address: "); buffer.append(std::to_string(pkt->getBlockAddr(blkSize)));
+		//for(int i=0; i<32; i++) {buffer.append(":");buffer.append(std::to_string(blk->wordsModifiedFlags[i]));}buffer.append(" blk->tag: ");buffer.append(std::to_string(blk->tag));
+		//buffer.append(" access: writeclean: setModifiedWordsFlagInBlock");
+		//DPRINTF(Cache, "%s\n", buffer);
+        //cout << "address: " << pkt->getBlockAddr(blkSize); for(int i=0; i<32; i++) cout << ":"<<blk->wordsModifiedFlags[i]; cout<<" blk->tag: " << blk->tag << " access: writeModifiedWordsFlagToBlock"<<endl;
         pkt->writeDataToBlock(blk->data, blkSize);
-        DPRINTF(Cache, "%s new state is %s\n", __func__, blk->print());
+        //DPRINTF(Cache, "%s new state is %s\n", __func__, blk->print());
 
         incHitCount(pkt);
         // populate the time when the block will be ready to access.
@@ -1123,9 +1203,9 @@ BaseCache::handleFill(PacketPtr pkt, CacheBlk *blk, PacketList &writebacks,
     assert(pkt->isResponse() || pkt->cmd == MemCmd::WriteLineReq);
     Addr addr = pkt->getAddr();
     bool is_secure = pkt->isSecure();
-#if TRACING_ON
-    CacheBlk::State old_state = blk ? blk->status : 0;
-#endif
+//#if TRACING_ON
+    //CacheBlk::State old_state = blk ? blk->status : 0;
+//#endif
 
     // When handling a fill, we should have no writes to this line.
     assert(addr == pkt->getBlockAddr(blkSize));
@@ -1151,8 +1231,8 @@ BaseCache::handleFill(PacketPtr pkt, CacheBlk *blk, PacketList &writebacks,
             assert(!tempBlock->isValid());
             blk = tempBlock;
             tempBlock->insert(addr, is_secure);
-            DPRINTF(Cache, "using temp block for %#llx (%s)\n", addr,
-                    is_secure ? "s" : "ns");
+            //DPRINTF(Cache, "using temp block for %#llx (%s)\n", addr,
+            //        is_secure ? "s" : "ns");
         }
 
         // we should never be overwriting a valid block
@@ -1201,8 +1281,8 @@ BaseCache::handleFill(PacketPtr pkt, CacheBlk *blk, PacketList &writebacks,
         }
     }
 
-    DPRINTF(Cache, "Block addr %#llx (%s) moving from state %x to %s\n",
-            addr, is_secure ? "s" : "ns", old_state, blk->print());
+    //DPRINTF(Cache, "Block addr %#llx (%s) moving from state %x to %s\n",
+    //        addr, is_secure ? "s" : "ns", old_state, blk->print());
 
     // if we got new data, copy it in (checking for a read response
     // and a response that has data is the same in the end)
@@ -1212,6 +1292,14 @@ BaseCache::handleFill(PacketPtr pkt, CacheBlk *blk, PacketList &writebacks,
         assert(pkt->getSize() == blkSize);
 
         pkt->writeDataToBlock(blk->data, blkSize);
+        //pkt->writeModifiedWordsFlagToBlock(blk->data);
+        pkt->setModifiedWordsFlagInBlock(blk->wordsModifiedFlags);
+        //std::string buffer;
+		//buffer.append("address: "); buffer.append(std::to_string(pkt->getBlockAddr(blkSize)));
+		//for(int i=0; i<32; i++) {buffer.append(":");buffer.append(std::to_string(blk->wordsModifiedFlags[i]));}buffer.append(" blk->tag: ");buffer.append(std::to_string(blk->tag));
+		//buffer.append(" handleFill: read: setModifiedWordsFlagInBlock");
+		//DPRINTF(Cache, "%s\n", buffer);
+        //cout << "address: " << pkt->getBlockAddr(blkSize); for(int i=0; i<32; i++) cout << ":"<<blk->wordsModifiedFlags[i]; cout<<" blk->tag: " << blk->tag << " handleFill: setModifiedWordsFlagInBlock"<<endl;
     }
     // We pay for fillLatency here.
     blk->whenReady = clockEdge() + fillLatency * clockPeriod() +
@@ -1259,11 +1347,11 @@ BaseCache::allocateBlock(const PacketPtr pkt, PacketList &writebacks)
     // The victim will be replaced by a new entry, so increase the replacement
     // counter if a valid block is being replaced
     if (victim->isValid()) {
-        DPRINTF(Cache, "replacement: replacing %#llx (%s) with %#llx "
-                "(%s): %s\n", regenerateBlkAddr(victim),
-                victim->isSecure() ? "s" : "ns",
-                addr, is_secure ? "s" : "ns",
-                victim->isDirty() ? "writeback" : "clean");
+        //DPRINTF(Cache, "replacement: replacing %#llx (%s) with %#llx "
+        //        "(%s): %s\n", regenerateBlkAddr(victim),
+        //        victim->isSecure() ? "s" : "ns",
+        //        addr, is_secure ? "s" : "ns",
+        //        victim->isDirty() ? "writeback" : "clean");
 
         replacements++;
     }
@@ -1314,8 +1402,8 @@ BaseCache::writebackBlk(CacheBlk *blk)
         new Packet(req, blk->isDirty() ?
                    MemCmd::WritebackDirty : MemCmd::WritebackClean);
 
-    DPRINTF(Cache, "Create Writeback %s writable: %d, dirty: %d\n",
-            pkt->print(), blk->isWritable(), blk->isDirty());
+    //DPRINTF(Cache, "Create Writeback %s writable: %d, dirty: %d\n",
+     //       pkt->print(), blk->isWritable(), blk->isDirty());
 
     if (blk->isWritable()) {
         // not asserting shared means we pass the block in modified
@@ -1331,7 +1419,13 @@ BaseCache::writebackBlk(CacheBlk *blk)
 
     pkt->allocate();
     pkt->setDataFromBlock(blk->data, blkSize);
-
+    pkt->setModifiedWordsFlagFromBlock(blk->wordsModifiedFlags);
+    //std::string buffer;
+	//buffer.append("address: "); buffer.append(std::to_string(pkt->getBlockAddr(blkSize)));
+	//for(int i=0; i<32; i++) {buffer.append(":");buffer.append(std::to_string(blk->wordsModifiedFlags[i]));}buffer.append(" blk->tag: ");buffer.append(std::to_string(blk->tag));
+	//buffer.append(" writebackBlk: setModifiedWordsFlagFromBlock");
+	//DPRINTF(Cache, "%s\n", buffer);
+    //cout << "address: " << pkt->getBlockAddr(blkSize); for(int i=0; i<32; i++) cout << ":"<<blk->wordsModifiedFlags[i]; cout<<" blk->tag: " << blk->tag << " writebackBlk: setModifiedWordsFlagFromBlock"<<endl;
     return pkt;
 }
 
@@ -1353,8 +1447,8 @@ BaseCache::writecleanBlk(CacheBlk *blk, Request::Flags dest, PacketId id)
         pkt->setWriteThrough();
     }
 
-    DPRINTF(Cache, "Create %s writable: %d, dirty: %d\n", pkt->print(),
-            blk->isWritable(), blk->isDirty());
+    //DPRINTF(Cache, "Create %s writable: %d, dirty: %d\n", pkt->print(),
+    //        blk->isWritable(), blk->isDirty());
 
     if (blk->isWritable()) {
         // not asserting shared means we pass the block in modified
@@ -1370,7 +1464,13 @@ BaseCache::writecleanBlk(CacheBlk *blk, Request::Flags dest, PacketId id)
 
     pkt->allocate();
     pkt->setDataFromBlock(blk->data, blkSize);
-
+    pkt->setModifiedWordsFlagFromBlock(blk->wordsModifiedFlags);
+    //std::string buffer;
+	//buffer.append("address: "); buffer.append(std::to_string(pkt->getBlockAddr(blkSize)));
+	//for(int i=0; i<32; i++) {buffer.append(":");buffer.append(std::to_string(blk->wordsModifiedFlags[i]));}buffer.append(" blk->tag: ");buffer.append(std::to_string(blk->tag));
+	//buffer.append(" writecleanBlk: setModifiedWordsFlagFromBlock");
+	//DPRINTF(Cache, "%s\n", buffer);
+    //cout << "address: " << pkt->getBlockAddr(blkSize); for(int i=0; i<32; i++) cout << ":"<<blk->wordsModifiedFlags[i]; cout<<" blk->tag: " << blk->tag << " writecleanBlk: setModifiedWordsFlagFromBlock"<<endl;
     return pkt;
 }
 
@@ -1454,7 +1554,7 @@ BaseCache::sendMSHRQueuePacket(MSHR* mshr)
     // use request from 1st target
     PacketPtr tgt_pkt = mshr->getTarget()->pkt;
 
-    DPRINTF(Cache, "%s: MSHR %s\n", __func__, tgt_pkt->print());
+    //DPRINTF(Cache, "%s: MSHR %s\n", __func__, tgt_pkt->print());
 
     CacheBlk *blk = tags->findBlock(mshr->blkAddr, mshr->isSecure);
 
@@ -1533,7 +1633,7 @@ BaseCache::sendWriteQueuePacket(WriteQueueEntry* wq_entry)
     // always a single target for write queue entries
     PacketPtr tgt_pkt = wq_entry->getTarget()->pkt;
 
-    DPRINTF(Cache, "%s: write %s\n", __func__, tgt_pkt->print());
+    //DPRINTF(Cache, "%s: write %s\n", __func__, tgt_pkt->print());
 
     // forward as is, both for evictions and uncacheable writes
     if (!memSidePort.sendTimingReq(tgt_pkt)) {
@@ -2351,3 +2451,4 @@ BaseCache::MemSidePort::MemSidePort(const std::string &_name,
       _snoopRespQueue(*_cache, *this, _label), cache(_cache)
 {
 }
+

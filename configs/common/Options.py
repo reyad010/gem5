@@ -85,10 +85,13 @@ def addNoISAOptions(parser):
     parser.add_option("--mem-ranks", type="int", default=None,
                       help = "number of memory ranks per channel")
     parser.add_option("--mem-size", action="store", type="string",
-                      default="512MB",
+                      default="256MB",
                       help="Specify the physical memory size (single memory)")
-
-
+    parser.add_option("--Ccache", type="string", help = "use countercache")
+    parser.add_option("--Ccache_size", type="string", default="8kB", help = "use countercache")
+    parser.add_option("--Ccache_assoc", type="int", default=2, help = "use countercache")
+    parser.add_option("--Ccache_blksize", type="string", default="64Byte", help = "use countercache")
+    parser.add_option("--Ccache_majpgsize", type="string", default="4KB", help = "use countercache")
     parser.add_option("--memchecker", action="store_true")
 
     # Cache Options
@@ -101,15 +104,18 @@ def addNoISAOptions(parser):
     parser.add_option("--num-dirs", type="int", default=1)
     parser.add_option("--num-l2caches", type="int", default=1)
     parser.add_option("--num-l3caches", type="int", default=1)
-    parser.add_option("--l1d_size", type="string", default="64kB")
+    #parser.add_option("--l1d_size", type="string", default="64kB") #default 
+    parser.add_option("--l1d_size", type="string", default="32kB")
     parser.add_option("--l1i_size", type="string", default="32kB")
-    parser.add_option("--l2_size", type="string", default="2MB")
+    #parser.add_option("--l2_size", type="string", default="2MB") #default
+    parser.add_option("--l2_size", type="string", default="512kB")
     parser.add_option("--l3_size", type="string", default="16MB")
     parser.add_option("--l1d_assoc", type="int", default=2)
     parser.add_option("--l1i_assoc", type="int", default=2)
     parser.add_option("--l2_assoc", type="int", default=8)
     parser.add_option("--l3_assoc", type="int", default=16)
     parser.add_option("--cacheline_size", type="int", default=64)
+    parser.add_option("--l3cache", action="store_true")
 
     # Enable Ruby
     parser.add_option("--ruby", action="store_true")
@@ -163,6 +169,8 @@ def addCommonOptions(parser):
 
     parser.add_option("-l", "--lpae", action="store_true")
     parser.add_option("-V", "--virtualisation", action="store_true")
+
+    parser.add_option("--fastmem", action="store_true")
 
     # dist-gem5 options
     parser.add_option("--dist", action="store_true",
@@ -341,8 +349,6 @@ def addFSOptions(parser):
         parser.add_option("--enable-context-switch-stats-dump", \
                 action="store_true", help="Enable stats dump at context "\
                 "switches and dump tasks file (required for Streamline)")
-        parser.add_option("--generate-dtb", action="store_true", default=False,
-                    help="Automatically generate a dtb file")
 
     # Benchmark options
     parser.add_option("--dual", action="store_true",
