@@ -329,6 +329,15 @@ class Packet : public Printable
   public:
 
     /**
+     * ================= PCM Flag =================
+     * This flag representes whether the cacheline is an oddline or even
+     * Incase of an oddline, the cacheline will have additional read latency
+     * 0 -> The cacheline comes from even line/even page
+     * 1 -> The cacheline comes from odd line/odd page
+     */
+    bool oddLine;
+
+    /**
      * The extra delay from seeing the packet until the header is
      * transmitted. This delay is used to communicate the crossbar
      * forwarding latency to the neighbouring object (e.g. a cache)

@@ -409,6 +409,17 @@ DRAMCtrl::decodeAddr(PacketPtr pkt, Addr dramPktAddr, unsigned size,
     // ready time set to the current tick, the latter will be updated
     // later
     uint16_t bank_id = banksPerRank * rank + bank;
+
+    // PCM: Findout if the cacheline comes from an even line or an odd line
+    uint64_t pcmAddr;
+    if (pcmType == 0) {
+        pcmAddr = dramPktAddr / 64;
+    }
+    else if (pcmType == 1) {
+        pcmAddr = dramPktAddr / 4096;
+    }
+    pkt->oddLine = pcmAddr % 2;
+
     return new DRAMPacket(pkt, isRead, rank, bank, row, bank_id, dramPktAddr,
                           size, ranks[rank]->banks[bank], *ranks[rank]);
 }
@@ -1066,6 +1077,9 @@ DRAMCtrl::doDRAMAccess(DRAMPacket* dram_pkt)
 
     // update the packet ready time
     dram_pkt->readyTime = cmd_at + tCL + tBURST;
+    if (dram_pkt->pkt->oddLine == 1 && dram_pkt->isRead) {
+        dram_pkt->readyTime = dram_pkt->readyTime + pcmLatency;
+    }
 
     // only one burst can use the bus at any one point in time
     assert(dram_pkt->readyTime - busBusyUntil >= tBURST);

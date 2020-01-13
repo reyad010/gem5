@@ -65,6 +65,16 @@
 #include "sim/eventq.hh"
 #include "mem/drampower.hh"
 
+#define pcm 1 
+/**
+ * 0 -> Cacheline interleaving (Subsequent cacheline is considered 
+        to come from odd/even line)
+ * 1 -> Page interleaving (Cacheline from subsequent page is considered
+        to come from odd/even line)
+ */
+#define pcmType 0
+#define pcmLatency 90000 // Additional latency for oddline (9ns)
+
 /**
  * The DRAM controller is a single-channel memory controller capturing
  * the most important timing constraints associated with a
